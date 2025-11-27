@@ -17,6 +17,11 @@ from pathlib import Path
 from typing import Callable, Optional
 from core.renovaciones.section_detector import SectionDetector
 from core.renovaciones.json_generator import JSONGenerator
+from core.renovaciones.divider import (
+    procesar_pdf_renovacion,
+    validar_json_renovaciones,
+    calcular_total_secciones_renovaciones
+)
 from core.utils.file_utils import (
     validar_carpeta_entrada,
     limpiar_nombres_archivos
@@ -178,42 +183,32 @@ def procesar_renovaciones(
             else:
                 nombre_trabajador = nombre_base[:50]  # Truncar si no hay patrón
             
-            # Extraer cada sección
-            secciones_extraidas = 0
+            # Procesar todas las secciones del PDF usando el divider
+            exitos, errores_pdf, detalles = procesar_pdf_renovacion(
+                ruta_pdf,
+                info,
+                carpeta_pdf,
+                nombre_trabajador
+            )
             
-            for nombre_seccion, rango in secciones.items():
-                if not rango:
-                    escribir_log(ruta_log_proceso, f"  ⚠️ {nombre_seccion}: No detectada (null)")
-                    continue
-                
-                try:
-                    # Formato: {seccion}-{fecha}-{nombre_trabajador}.pdf
-                    nombre_salida = f"{nombre_seccion}-{fecha_contrato}-{nombre_trabajador}.pdf"
-                    ruta_salida = os.path.join(carpeta_pdf, nombre_salida)
-                    
-                    # Extraer páginas
-                    extraer_paginas_pdf(ruta_pdf, rango, ruta_salida)
-                    
-                    escribir_log(
-                        ruta_log_proceso,
-                        f"  ✅ {nombre_seccion}: páginas {rango['inicio']}-{rango['fin']} → {nombre_salida}"
-                    )
-                    
-                    secciones_extraidas += 1
-                    total_secciones_extraidas += 1
-                    
-                except Exception as e:
-                    escribir_log(
-                        ruta_log_proceso,
-                        f"  ❌ Error extrayendo {nombre_seccion}: {str(e)}"
-                    )
+            # Actualizar contadores globales
+            total_secciones_extraidas += exitos
             
-            escribir_log(ruta_log_proceso, f"Total extraído: {secciones_extraidas} secciones")
+            # Log de detalles
+            for nombre_seccion, estado, mensaje in detalles:
+                if estado == 'exito':
+                    escribir_log(ruta_log_proceso, f"  ✅ {nombre_seccion}: {mensaje}")
+                elif estado == 'omitido':
+                    escribir_log(ruta_log_proceso, f"  ⚠️ {nombre_seccion}: {mensaje}")
+                elif estado == 'error':
+                    escribir_log(ruta_log_proceso, f"  ❌ Error en {nombre_seccion}: {mensaje}")
+            
+            escribir_log(ruta_log_proceso, f"Total extraído: {exitos} secciones")
             escribir_log(ruta_log_proceso, "✅ Procesamiento exitoso\n")
             
-            escribir_log(ruta_log_interfaz, f"✅ Archivo {idx} procesado: {secciones_extraidas} secciones extraídas")
+            escribir_log(ruta_log_interfaz, f"✅ Archivo {idx} procesado: {exitos} secciones extraídas")
             if log_gui_callback:
-                log_gui_callback(f"✅ Archivo {idx} procesado: {secciones_extraidas} secciones extraídas", "success")
+                log_gui_callback(f"✅ Archivo {idx} procesado: {exitos} secciones extraídas", "success")
             
             exitosos += 1
             
@@ -290,30 +285,6 @@ def procesar_renovaciones(
         'ruta_log_proceso': ruta_log_proceso,
         'carpeta_salida': carpeta_salida
     }
-
-
-def extraer_paginas_pdf(ruta_pdf: str, paginas: dict, ruta_salida: str):
-    """
-    Extrae un rango de páginas de un PDF usando PyMuPDF.
-    
-    Args:
-        ruta_pdf: Ruta del PDF original
-        paginas: Dict con {"inicio": 1, "fin": 6} (base-1)
-        ruta_salida: Ruta donde guardar el PDF extraído
-    """
-    with fitz.open(ruta_pdf) as pdf:
-        nuevo_pdf = fitz.open()
-        total_paginas = len(pdf)
-        
-        # Convertir de base-1 (JSON) a base-0 (PyMuPDF)
-        inicio = max(paginas["inicio"] - 1, 0)
-        fin = min(paginas["fin"], total_paginas)
-        
-        for i in range(inicio, fin):
-            nuevo_pdf.insert_pdf(pdf, from_page=i, to_page=i)
-        
-        nuevo_pdf.save(ruta_salida)
-        nuevo_pdf.close()
 
 
 def diagnosticar_renovaciones(
