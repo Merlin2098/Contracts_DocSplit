@@ -18,7 +18,7 @@
   },
   "components": {
     "button": {
-      "background": "##38BDF8",
+      "background": "#38BDF8",
       "text": "#FFFFFF",
       "hover": "#0EA5E9"
     },

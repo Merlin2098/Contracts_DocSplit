@@ -18,9 +18,9 @@
   },
   "components": {
     "button": {
-      "background": "##0284C7",
+      "background": "#0284C7",
       "text": "#1E293B",
-      "hover": "CBD5E1"
+      "hover": "#CBD5E1"
     },
     "card": {
       "background": "#FFFFFF",

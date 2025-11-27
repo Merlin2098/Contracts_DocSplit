@@ -2,7 +2,7 @@ import sys
 import winsound
 from PyQt5.QtWidgets import (
     QMainWindow, QApplication, QTabWidget,
-    QWidget, QVBoxLayout, QHBoxLayout, QPushButton
+    QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel
 )
 from PyQt5.QtCore import pyqtSignal, Qt
 from PyQt5.QtGui import QIcon
@@ -60,6 +60,21 @@ class MainWindow(QMainWindow):
 
         container_layout.addLayout(top_layout)
         container_layout.addWidget(self.tabs)
+        
+        # Footer
+        self.footer_label = QLabel("Noviembre 2025 | Desarrollado por Ricardo Uculmana")
+        self.footer_label.setAlignment(Qt.AlignCenter)
+        self.footer_label.setStyleSheet("""
+            QLabel {
+                color: DarkTurquoise;
+                font-size: 14px;
+                font-weight: bold;
+                padding: 8px;
+                background-color: transparent;
+            }
+        """)
+        container_layout.addWidget(self.footer_label)
+        
         self.setCentralWidget(container_widget)
 
         # Aplicar tema inicial
