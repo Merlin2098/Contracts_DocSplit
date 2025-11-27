@@ -1,317 +1,642 @@
 """
-Detector de secciones para workflow de Renovaciones.
-Detecta: Renovacion de Contrato, Guía de Peligros, Auditoría.
-Extrae fecha de contrato desde la página de Auditoría.
+Controlador para el módulo de Contratos.
+Ubicación: controllers/contratos_controller.py
+
+Orquesta las tres fases del workflow:
+1. Normalizar: Renombra PDFs según nombre del trabajador
+2. Diagnosticar: Detecta las 12 secciones y genera JSON consolidado
+3. Procesar: Extrae secciones individuales basándose en el JSON
 """
 
-import re
-from typing import List, Dict, Tuple, Optional
+import os
+import json
+from datetime import datetime
+from core.contratos.normalizer import normalizar_nombre_pdf, generar_nombre_unico
+from core.contratos.section_detector import SectionDetector
+from core.contratos.json_generator import JSONGenerator
+from core.contratos.processor import (
+    procesar_pdf_individual,
+    obtener_carpeta_trabajador_unica,
+    validar_json_diagnostico,
+    calcular_total_secciones
+)
+from core.utils.logger import (
+    obtener_directorio_logs,
+    generar_nombre_log_con_timestamp,
+    escribir_log,
+    crear_log_header,
+    format_duration
+)
 
 
-class SectionDetector:
+def normalizar_contratos(carpeta_entrada, progress_callback=None, log_gui_callback=None):
     """
-    Detecta y clasifica las 3 secciones principales en PDFs de renovaciones.
+    Fase 1: Normaliza los nombres de los PDFs de contratos.
+    
+    Args:
+        carpeta_entrada (str): Ruta de la carpeta con los PDFs
+        progress_callback (callable): Función para reportar progreso
+            Firma: progress_callback(current, total, message, percentage)
+        log_gui_callback (callable): Función para enviar logs a la GUI
+            Firma: log_gui_callback(mensaje, tipo)
+    
+    Returns:
+        dict: {
+            'exitoso': bool,
+            'mensaje': str,
+            'archivos_normalizados': int,
+            'ruta_log': str,
+            'duracion': str
+        }
     """
+    inicio = datetime.now()
     
-    PATRONES = {
-        "renovacion": [
-            "PRÓRROGA DE CONTRATO",
-            "PRORROGA DE CONTRATO",
-            "Renovación de Contrato",
-            "Renovacion de Contrato",
-            "RENOVACIÓN DE CONTRATO",
-            "RENOVACION DE CONTRATO"
-        ],
-        "guia_peligros": [
-            "Guía de tipos de peligros y riesgos asociados",
-            "Guia de tipos de peligros",
-            "tipos de peligros y riesgos",
-            "PELIGROS RIESGOS"
-        ],
-        "auditoria": [
-            "Informe de auditoría final",
-            "Informe de auditoria final",
-            "INFORME DE AUDITORÍA FINAL",
-            "INFORME DE AUDITORIA FINAL",
-            "Fecha de creación:"
-        ]
-    }
+    # Inicializar logger usando la estructura correcta
+    carpeta_logs = obtener_directorio_logs("contratos", crear=True)
+    ruta_log = generar_nombre_log_con_timestamp("normalizacion", carpeta_logs)
+    crear_log_header(ruta_log, "NORMALIZACIÓN DE CONTRATOS")
     
-    def __init__(self):
-        self.log_callback = None
-    
-    def detectar_todas_secciones(
-        self, 
-        texto_paginas: List[str],
-        log_callback=None
-    ) -> Dict:
-        """
-        Detecta todas las secciones en el PDF completo.
+    try:
+        escribir_log(ruta_log, "="*80)
+        escribir_log(ruta_log, "INICIO DE NORMALIZACIÓN DE CONTRATOS")
+        escribir_log(ruta_log, "="*80)
+        escribir_log(ruta_log, f"Carpeta de entrada: {carpeta_entrada}")
         
-        Args:
-            texto_paginas: Lista con texto extraído por página
-            log_callback: Función para logging (opcional)
-        
-        Returns:
-            Dict con estructura:
-            {
-                "total_paginas": int,
-                "secciones": [
-                    {
-                        "tipo_seccion": str,
-                        "pagina_inicio": int,
-                        "pagina_fin": int,
-                        "total_paginas_seccion": int,
-                        "metadata": dict
-                    },
-                    ...
-                ],
-                "errores": []
+        # Verificar que la carpeta existe
+        if not os.path.isdir(carpeta_entrada):
+            mensaje = f"La carpeta no existe: {carpeta_entrada}"
+            escribir_log(ruta_log, f"ERROR: {mensaje}")
+            if log_gui_callback:
+                log_gui_callback(f"❌ {mensaje}", "error")
+            
+            return {
+                'exitoso': False,
+                'mensaje': mensaje,
+                'archivos_normalizados': 0,
+                'ruta_log': ruta_log,
+                'duracion': '0s'
             }
-        """
-        self.log_callback = log_callback
-        n_paginas = len(texto_paginas)
         
-        resultado = {
-            "total_paginas": n_paginas,
-            "secciones": [],
-            "errores": []
-        }
+        # Listar PDFs
+        archivos = [f for f in os.listdir(carpeta_entrada) if f.lower().endswith('.pdf')]
+        total_archivos = len(archivos)
         
-        if log_callback:
-            log_callback(f"📄 Analizando {n_paginas} páginas...")
+        escribir_log(ruta_log, f"PDFs detectados: {total_archivos}")
         
-        # Detectar auditoría primero (para extraer fecha)
-        auditorias, fecha_contrato = self._detectar_auditorias(texto_paginas)
+        if log_gui_callback:
+            log_gui_callback(f"📁 Carpeta: {carpeta_entrada}", "info")
+            log_gui_callback(f"📄 PDFs encontrados: {total_archivos}", "info")
+            log_gui_callback("", "info")
         
-        # Detectar renovación de contrato
-        renovaciones = self._detectar_renovaciones(texto_paginas, fecha_contrato)
-        resultado["secciones"].extend(renovaciones)
-        
-        # Detectar guías de peligro
-        guias = self._detectar_guias_peligro(texto_paginas)
-        resultado["secciones"].extend(guias)
-        
-        # Agregar auditorías
-        resultado["secciones"].extend(auditorias)
-        
-        # Ordenar por página de inicio
-        resultado["secciones"].sort(key=lambda x: x["pagina_inicio"])
-        
-        if log_callback:
-            log_callback(f"✅ Detección completa: {len(resultado['secciones'])} secciones encontradas")
-        
-        return resultado
-    
-    def _detectar_renovaciones(
-        self, 
-        texto_paginas: List[str],
-        fecha_contrato: Optional[str]
-    ) -> List[Dict]:
-        """
-        Detecta renovaciones de contrato.
-        La renovación va desde la página 0 hasta antes de la guía de peligros.
-        """
-        renovaciones = []
-        n_paginas = len(texto_paginas)
-        
-        # Buscar inicio de renovación (primera página con patrón)
-        inicio_renovacion = None
-        for i, texto in enumerate(texto_paginas):
-            texto_lower = texto.lower()
-            if any(patron.lower() in texto_lower for patron in self.PATRONES["renovacion"]):
-                inicio_renovacion = i
-                break
-        
-        if inicio_renovacion is None:
-            if self.log_callback:
-                self.log_callback("  ⚠️ No se detectó renovación de contrato")
-            return []
-        
-        # Buscar fin de renovación (antes de guía de peligros o auditoría)
-        fin_renovacion = n_paginas - 1
-        
-        # Buscar inicio de guía de peligros
-        for i, texto in enumerate(texto_paginas):
-            texto_lower = texto.lower()
-            if any(patron.lower() in texto_lower for patron in self.PATRONES["guia_peligros"]):
-                fin_renovacion = i - 1
-                break
-        
-        # Si no hay guía, buscar auditoría
-        if fin_renovacion == n_paginas - 1:
-            for i, texto in enumerate(texto_paginas):
-                texto_lower = texto.lower()
-                if any(patron.lower() in texto_lower for patron in self.PATRONES["auditoria"]):
-                    fin_renovacion = i - 1
-                    break
-        
-        # Validar rango
-        if fin_renovacion < inicio_renovacion:
-            fin_renovacion = inicio_renovacion
-        
-        renovacion = {
-            "tipo_seccion": "Renovacion de Contrato",
-            "pagina_inicio": inicio_renovacion,
-            "pagina_fin": fin_renovacion,
-            "total_paginas_seccion": fin_renovacion - inicio_renovacion + 1,
-            "metadata": {
-                "fecha_contrato": fecha_contrato
+        if total_archivos == 0:
+            mensaje = "No se encontraron archivos PDF en la carpeta"
+            escribir_log(ruta_log, f"WARNING: {mensaje}")
+            if log_gui_callback:
+                log_gui_callback(f"⚠️ {mensaje}", "warning")
+            
+            return {
+                'exitoso': False,
+                'mensaje': mensaje,
+                'archivos_normalizados': 0,
+                'ruta_log': ruta_log,
+                'duracion': '0s'
             }
-        }
-        renovaciones.append(renovacion)
         
-        if self.log_callback:
-            self.log_callback(
-                f"  ✓ Renovación de Contrato: páginas {inicio_renovacion}-{fin_renovacion} "
-                f"(Fecha: {fecha_contrato})"
-            )
+        # Inicializar contadores
+        archivos_normalizados = 0
         
-        return renovaciones
-    
-    def _detectar_guias_peligro(self, texto_paginas: List[str]) -> List[Dict]:
-        """
-        Detecta guías de peligro usando marcador de tabla de peligros.
-        """
-        guias = []
-        n_paginas = len(texto_paginas)
-        
-        # Buscar páginas con el patrón de guía de peligros
-        paginas_candidatas = []
-        for i, texto in enumerate(texto_paginas):
-            texto_lower = texto.lower()
-            if any(patron.lower() in texto_lower for patron in self.PATRONES["guia_peligros"]):
-                paginas_candidatas.append(i)
-        
-        if not paginas_candidatas:
-            if self.log_callback:
-                self.log_callback("  ⚠️ No se detectaron guías de peligro")
-            return []
-        
-        inicio = paginas_candidatas[0]
-        fin = inicio
-        
-        # Buscar paginación interna tipo "Page X of Y"
-        for j in range(inicio, min(inicio + 15, n_paginas)):
-            texto_lower = texto_paginas[j].lower()
-            match = re.search(r'page\s+(\d+)\s+of\s+(\d+)', texto_lower)
-            if match:
-                pagina_actual = int(match.group(1))
-                total_paginas = int(match.group(2))
+        # Procesar cada PDF
+        for idx, archivo in enumerate(archivos, 1):
+            ruta_completa = os.path.join(carpeta_entrada, archivo)
+            
+            # Actualizar progreso
+            porcentaje = int((idx / total_archivos) * 100)
+            if progress_callback:
+                progress_callback(idx, total_archivos, f"Procesando: {archivo}", porcentaje)
+            
+            escribir_log(ruta_log, f"\n--- Procesando [{idx}/{total_archivos}]: {archivo} ---")
+            
+            try:
+                # Normalizar nombre
+                nombre_normalizado, fue_modificado = normalizar_nombre_pdf(archivo)
                 
-                # Si encontramos la última página, ese es el fin
-                if pagina_actual == total_paginas:
-                    fin = j
-                    break
+                if fue_modificado:
+                    # Generar nombre único si ya existe
+                    nombre_sin_ext = os.path.splitext(nombre_normalizado)[0]
+                    nombre_final = generar_nombre_unico(carpeta_entrada, nombre_sin_ext, ".pdf")
+                    ruta_nueva = os.path.join(carpeta_entrada, nombre_final)
+                    
+                    # Renombrar archivo
+                    os.rename(ruta_completa, ruta_nueva)
+                    archivos_normalizados += 1
+                    
+                    escribir_log(ruta_log, f"✅ Normalizado: {archivo} → {nombre_final}")
+                    
+                    if log_gui_callback:
+                        log_gui_callback(
+                            f"✅ [{idx}/{total_archivos}] Renombrado: {archivo} → {nombre_final}", 
+                            "success"
+                        )
+                else:
+                    escribir_log(ruta_log, f"✅ Ya normalizado: {archivo}")
+                    if log_gui_callback:
+                        log_gui_callback(
+                            f"✅ [{idx}/{total_archivos}] Ya normalizado: {archivo}", 
+                            "info"
+                        )
+            
+            except Exception as e:
+                escribir_log(ruta_log, f"❌ Error procesando {archivo}: {str(e)}")
+                if log_gui_callback:
+                    log_gui_callback(
+                        f"❌ [{idx}/{total_archivos}] Error en {archivo}: {str(e)}", 
+                        "error"
+                    )
         
-        # Si no encontramos paginación, buscar hasta antes de auditoría
-        if fin == inicio:
-            for j in range(inicio + 1, n_paginas):
-                texto_lower = texto_paginas[j].lower()
-                if any(patron.lower() in texto_lower for patron in self.PATRONES["auditoria"]):
-                    fin = j - 1
-                    break
-            else:
-                fin = n_paginas - 1
+        # Finalizar
+        fin = datetime.now()
+        duracion = fin - inicio
+        duracion_str = format_duration(duracion.total_seconds())
         
-        guia = {
-            "tipo_seccion": "Guia de Peligro",
-            "pagina_inicio": inicio,
-            "pagina_fin": fin,
-            "total_paginas_seccion": fin - inicio + 1,
-            "metadata": {
-                "tiene_paginacion": fin > inicio
-            }
+        escribir_log(ruta_log, "\n" + "="*80)
+        escribir_log(ruta_log, "RESUMEN DE NORMALIZACIÓN")
+        escribir_log(ruta_log, "="*80)
+        escribir_log(ruta_log, f"Archivos procesados: {total_archivos}")
+        escribir_log(ruta_log, f"Archivos normalizados: {archivos_normalizados}")
+        escribir_log(ruta_log, f"Duración: {duracion_str}")
+        escribir_log(ruta_log, f"Fin: {fin.strftime('%Y-%m-%d %H:%M:%S')}")
+        
+        if log_gui_callback:
+            log_gui_callback("", "info")
+            log_gui_callback(f"✅ Normalización completada: {archivos_normalizados}/{total_archivos} archivos", "success")
+        
+        return {
+            'exitoso': True,
+            'mensaje': f'Normalización exitosa: {archivos_normalizados}/{total_archivos} archivos',
+            'archivos_normalizados': archivos_normalizados,
+            'ruta_log': ruta_log,
+            'duracion': duracion_str
         }
-        guias.append(guia)
-        
-        if self.log_callback:
-            self.log_callback(f"  ✓ Guía de Peligro: páginas {inicio}-{fin}")
-        
-        return guias
     
-    def _detectar_auditorias(
-        self, 
-        texto_paginas: List[str]
-    ) -> Tuple[List[Dict], Optional[str]]:
-        """
-        Detecta informes de auditoría y extrae la fecha del contrato.
+    except Exception as e:
+        escribir_log(ruta_log, f"Error crítico en normalización: {str(e)}")
+        if log_gui_callback:
+            log_gui_callback(f"❌ Error crítico: {str(e)}", "error")
         
-        Returns:
-            Tuple: (lista de auditorías, fecha_contrato en formato MM.YYYY)
-        """
-        auditorias = []
-        fecha_contrato = None
-        
-        # Buscar todas las páginas con el patrón de auditoría
-        paginas_aud = []
-        for i, texto in enumerate(texto_paginas):
-            texto_lower = texto.lower()
-            if any(patron.lower() in texto_lower for patron in self.PATRONES["auditoria"]):
-                paginas_aud.append(i)
-        
-        if not paginas_aud:
-            if self.log_callback:
-                self.log_callback("  ⚠️ No se detectaron auditorías")
-            return [], None
-        
-        # Agrupar páginas consecutivas
-        inicio = paginas_aud[0]
-        fin = paginas_aud[-1]
-        
-        # Extraer fecha del contrato de la página de auditoría
-        fecha_contrato = self._extraer_fecha_auditoria(texto_paginas, inicio, fin)
-        
-        auditoria = {
-            "tipo_seccion": "Auditoria",
-            "pagina_inicio": inicio,
-            "pagina_fin": fin,
-            "total_paginas_seccion": fin - inicio + 1,
-            "metadata": {
-                "fecha_contrato": fecha_contrato
-            }
+        return {
+            'exitoso': False,
+            'mensaje': f'Error crítico: {str(e)}',
+            'archivos_normalizados': 0,
+            'ruta_log': ruta_log,
+            'duracion': '0s'
         }
-        auditorias.append(auditoria)
-        
-        if self.log_callback:
-            self.log_callback(f"  ✓ Auditoría: páginas {inicio}-{fin} (Fecha: {fecha_contrato})")
-        
-        return auditorias, fecha_contrato
+
+
+def diagnosticar_contratos(carpeta_entrada, progress_callback=None, log_gui_callback=None):
+    """
+    Fase 2: Diagnostica las secciones de los contratos y genera JSON consolidado.
     
-    def _extraer_fecha_auditoria(
-        self, 
-        texto_paginas: List[str], 
-        inicio_aud: int,
-        fin_aud: int
-    ) -> Optional[str]:
-        """
-        Extrae la fecha del contrato desde la página de auditoría.
-        Busca patrón: "Fecha de creación: YYYY-MM-DD"
-        Retorna formato: "MM.YYYY"
+    Args:
+        carpeta_entrada (str): Ruta de la carpeta con los PDFs normalizados
+        progress_callback (callable): Función para reportar progreso
+        log_gui_callback (callable): Función para enviar logs a la GUI
+    
+    Returns:
+        dict: {
+            'exitoso': bool,
+            'mensaje': str,
+            'secciones_detectadas': int,
+            'secciones_faltantes': int,
+            'ruta_json': str,
+            'ruta_log': str,
+            'duracion': str
+        }
+    """
+    inicio = datetime.now()
+    
+    # Inicializar logger usando la estructura correcta
+    carpeta_logs = obtener_directorio_logs("contratos", crear=True)
+    ruta_log = generar_nombre_log_con_timestamp("diagnostico", carpeta_logs)
+    crear_log_header(ruta_log, "DIAGNÓSTICO DE CONTRATOS")
+    
+    try:
+        escribir_log(ruta_log, "="*80)
+        escribir_log(ruta_log, "INICIO DE DIAGNÓSTICO DE CONTRATOS")
+        escribir_log(ruta_log, "="*80)
+        escribir_log(ruta_log, f"Carpeta de entrada: {carpeta_entrada}")
         
-        Args:
-            texto_paginas: Lista de textos por página
-            inicio_aud: Índice de inicio de auditoría
-            fin_aud: Índice de fin de auditoría
+        # Verificar carpeta
+        if not os.path.isdir(carpeta_entrada):
+            mensaje = f"La carpeta no existe: {carpeta_entrada}"
+            escribir_log(ruta_log, f"ERROR: {mensaje}")
+            if log_gui_callback:
+                log_gui_callback(f"❌ {mensaje}", "error")
+            
+            return {
+                'exitoso': False,
+                'mensaje': mensaje,
+                'secciones_detectadas': 0,
+                'secciones_faltantes': 0,
+                'ruta_json': '',
+                'ruta_log': ruta_log,
+                'duracion': '0s'
+            }
         
-        Returns:
-            Fecha en formato "MM.YYYY" o None si no se encuentra
-        """
-        # Buscar en todas las páginas de auditoría
-        for i in range(inicio_aud, fin_aud + 1):
-            if i >= len(texto_paginas):
+        # Listar PDFs
+        archivos = [f for f in os.listdir(carpeta_entrada) if f.lower().endswith('.pdf')]
+        total_archivos = len(archivos)
+        
+        escribir_log(ruta_log, f"PDFs detectados: {total_archivos}")
+        
+        if log_gui_callback:
+            log_gui_callback(f"📁 Carpeta: {carpeta_entrada}", "info")
+            log_gui_callback(f"📄 PDFs encontrados: {total_archivos}", "info")
+            log_gui_callback("", "info")
+        
+        if total_archivos == 0:
+            mensaje = "No se encontraron archivos PDF en la carpeta"
+            escribir_log(ruta_log, f"WARNING: {mensaje}")
+            if log_gui_callback:
+                log_gui_callback(f"⚠️ {mensaje}", "warning")
+            
+            return {
+                'exitoso': False,
+                'mensaje': mensaje,
+                'secciones_detectadas': 0,
+                'secciones_faltantes': 0,
+                'ruta_json': '',
+                'ruta_log': ruta_log,
+                'duracion': '0s'
+            }
+        
+        # Inicializar generador JSON
+        json_gen = JSONGenerator()
+        
+        # Procesar cada PDF
+        for idx, archivo in enumerate(archivos, 1):
+            ruta_completa = os.path.join(carpeta_entrada, archivo)
+            
+            # Actualizar progreso
+            porcentaje = int((idx / total_archivos) * 100)
+            if progress_callback:
+                progress_callback(idx, total_archivos, f"Diagnosticando: {archivo}", porcentaje)
+            
+            escribir_log(ruta_log, f"\n--- Diagnosticando [{idx}/{total_archivos}]: {archivo} ---")
+            
+            try:
+                # Inicializar detector con la ruta del PDF
+                detector = SectionDetector(ruta_completa)
+                
+                # Detectar secciones
+                resultado = detector.detectar_todas_secciones()
+                
+                # Agregar al JSON consolidado
+                json_gen.agregar_archivo(archivo, resultado)
+                
+                # Contar detecciones
+                secciones = resultado.get('secciones', {})
+                detectadas = sum(1 for r in secciones.values() if r is not None)
+                faltantes = sum(1 for r in secciones.values() if r is None)
+                
+                escribir_log(ruta_log, f"Secciones detectadas: {detectadas}/12")
+                escribir_log(ruta_log, f"Fecha contrato: {resultado.get('fecha_contrato', 'No detectada')}")
+                
+                if log_gui_callback:
+                    log_gui_callback(
+                        f"✅ [{idx}/{total_archivos}] {archivo}: {detectadas}/12 secciones detectadas",
+                        "success" if detectadas >= 10 else "warning"
+                    )
+            
+            except Exception as e:
+                escribir_log(ruta_log, f"❌ Error diagnosticando {archivo}: {str(e)}")
+                if log_gui_callback:
+                    log_gui_callback(
+                        f"❌ [{idx}/{total_archivos}] Error en {archivo}: {str(e)}",
+                        "error"
+                    )
+        
+        # Generar JSON consolidado
+        ruta_json = os.path.join(carpeta_entrada, "diagnostico_rangos.json")
+        json_gen.generar_json_consolidado(ruta_json)
+        
+        escribir_log(ruta_log, f"\n✅ JSON consolidado generado: {ruta_json}")
+        
+        # Obtener resumen
+        resumen = json_gen.obtener_resumen()
+        
+        # Finalizar
+        fin = datetime.now()
+        duracion = fin - inicio
+        duracion_str = format_duration(duracion.total_seconds())
+        
+        escribir_log(ruta_log, "\n" + "="*80)
+        escribir_log(ruta_log, "RESUMEN DE DIAGNÓSTICO")
+        escribir_log(ruta_log, "="*80)
+        escribir_log(ruta_log, f"Archivos procesados: {resumen['total_archivos']}")
+        escribir_log(ruta_log, f"Secciones detectadas: {resumen['total_secciones_detectadas']}")
+        escribir_log(ruta_log, f"Secciones faltantes: {resumen['total_secciones_faltantes']}")
+        escribir_log(ruta_log, f"Duración: {duracion_str}")
+        escribir_log(ruta_log, f"Fin: {fin.strftime('%Y-%m-%d %H:%M:%S')}")
+        
+        if log_gui_callback:
+            log_gui_callback("", "info")
+            log_gui_callback(f"✅ Diagnóstico completado: {resumen['total_secciones_detectadas']} secciones detectadas", "success")
+            log_gui_callback(f"📄 JSON generado: {ruta_json}", "info")
+        
+        return {
+            'exitoso': True,
+            'mensaje': f"Diagnóstico exitoso: {resumen['total_secciones_detectadas']} secciones detectadas",
+            'secciones_detectadas': resumen['total_secciones_detectadas'],
+            'secciones_faltantes': resumen['total_secciones_faltantes'],
+            'ruta_json': ruta_json,
+            'ruta_log': ruta_log,
+            'duracion': duracion_str
+        }
+    
+    except Exception as e:
+        escribir_log(ruta_log, f"Error crítico en diagnóstico: {str(e)}")
+        if log_gui_callback:
+            log_gui_callback(f"❌ Error crítico: {str(e)}", "error")
+        
+        return {
+            'exitoso': False,
+            'mensaje': f'Error crítico: {str(e)}',
+            'secciones_detectadas': 0,
+            'secciones_faltantes': 0,
+            'ruta_json': '',
+            'ruta_log': ruta_log,
+            'duracion': '0s'
+        }
+
+
+def procesar_contratos(carpeta_entrada, progress_callback=None, log_gui_callback=None):
+    """
+    Fase 3: Extrae secciones individuales basándose en el JSON de diagnóstico.
+    
+    Args:
+        carpeta_entrada (str): Ruta de la carpeta con los PDFs y el JSON
+        progress_callback (callable): Función para reportar progreso
+            Firma: progress_callback(current, total, message, percentage)
+        log_gui_callback (callable): Función para enviar logs a la GUI
+            Firma: log_gui_callback(mensaje, tipo)
+    
+    Returns:
+        dict: {
+            'exitoso': bool,
+            'mensaje': str,
+            'secciones_extraidas': int,
+            'secciones_omitidas': int,
+            'errores': int,
+            'ruta_salida': str,
+            'ruta_log': str,
+            'duracion': str
+        }
+    """
+    inicio = datetime.now()
+    
+    # Inicializar logger usando la estructura correcta
+    carpeta_logs = obtener_directorio_logs("contratos", crear=True)
+    ruta_log = generar_nombre_log_con_timestamp("procesamiento", carpeta_logs)
+    crear_log_header(ruta_log, "PROCESAMIENTO DE CONTRATOS")
+    
+    try:
+        escribir_log(ruta_log, "="*80)
+        escribir_log(ruta_log, "INICIO DE PROCESAMIENTO DE CONTRATOS")
+        escribir_log(ruta_log, "="*80)
+        escribir_log(ruta_log, f"Carpeta de entrada: {carpeta_entrada}")
+        
+        # Validar carpeta
+        if not os.path.isdir(carpeta_entrada):
+            mensaje = f"La carpeta no existe: {carpeta_entrada}"
+            escribir_log(ruta_log, f"ERROR: {mensaje}")
+            if log_gui_callback:
+                log_gui_callback(f"❌ {mensaje}", "error")
+            
+            return {
+                'exitoso': False,
+                'mensaje': mensaje,
+                'secciones_extraidas': 0,
+                'secciones_omitidas': 0,
+                'errores': 0,
+                'ruta_salida': '',
+                'ruta_log': ruta_log,
+                'duracion': '0s'
+            }
+        
+        # Validar existencia del JSON de diagnóstico
+        ruta_json = os.path.join(carpeta_entrada, "diagnostico_rangos.json")
+        if not os.path.exists(ruta_json):
+            mensaje = "No se encontró el archivo 'diagnostico_rangos.json'. Ejecute primero el diagnóstico."
+            escribir_log(ruta_log, f"ERROR: {mensaje}")
+            if log_gui_callback:
+                log_gui_callback(f"❌ {mensaje}", "error")
+            
+            return {
+                'exitoso': False,
+                'mensaje': mensaje,
+                'secciones_extraidas': 0,
+                'secciones_omitidas': 0,
+                'errores': 0,
+                'ruta_salida': '',
+                'ruta_log': ruta_log,
+                'duracion': '0s'
+            }
+        
+        # Cargar JSON
+        escribir_log(ruta_log, f"Cargando JSON: {ruta_json}")
+        try:
+            with open(ruta_json, 'r', encoding='utf-8') as f:
+                datos_json = json.load(f)
+        except json.JSONDecodeError as e:
+            mensaje = f"Error al leer JSON: {str(e)}"
+            escribir_log(ruta_log, f"ERROR: {mensaje}")
+            if log_gui_callback:
+                log_gui_callback(f"❌ {mensaje}", "error")
+            
+            return {
+                'exitoso': False,
+                'mensaje': mensaje,
+                'secciones_extraidas': 0,
+                'secciones_omitidas': 0,
+                'errores': 0,
+                'ruta_salida': '',
+                'ruta_log': ruta_log,
+                'duracion': '0s'
+            }
+        
+        # Validar estructura del JSON
+        es_valido, mensaje_error = validar_json_diagnostico(datos_json)
+        if not es_valido:
+            escribir_log(ruta_log, f"ERROR: JSON inválido: {mensaje_error}")
+            if log_gui_callback:
+                log_gui_callback(f"❌ JSON inválido: {mensaje_error}", "error")
+            
+            return {
+                'exitoso': False,
+                'mensaje': f'JSON inválido: {mensaje_error}',
+                'secciones_extraidas': 0,
+                'secciones_omitidas': 0,
+                'errores': 0,
+                'ruta_salida': '',
+                'ruta_log': ruta_log,
+                'duracion': '0s'
+            }
+        
+        total_archivos = len(datos_json)
+        escribir_log(ruta_log, f"PDFs a procesar: {total_archivos}")
+        
+        if log_gui_callback:
+            log_gui_callback(f"📁 Carpeta: {carpeta_entrada}", "info")
+            log_gui_callback(f"📄 PDFs a procesar: {total_archivos}", "info")
+            log_gui_callback("", "info")
+        
+        # Crear carpeta de salida
+        carpeta_salida = os.path.join(carpeta_entrada, "pdfs_extraidos")
+        os.makedirs(carpeta_salida, exist_ok=True)
+        escribir_log(ruta_log, f"Carpeta de salida: {carpeta_salida}")
+        
+        # Calcular total de secciones a procesar
+        total_secciones = calcular_total_secciones(datos_json)
+        escribir_log(ruta_log, f"Total de secciones a extraer: {total_secciones}")
+        
+        # Contadores
+        secciones_extraidas = 0
+        secciones_omitidas = 0
+        errores = 0
+        secciones_procesadas = 0
+        
+        # Procesar cada PDF
+        for nombre_archivo, info_secciones in datos_json.items():
+            ruta_pdf = os.path.join(carpeta_entrada, nombre_archivo)
+            
+            escribir_log(ruta_log, f"\n--- Procesando: {nombre_archivo} ---")
+            
+            # Validar que el PDF original existe
+            if not os.path.exists(ruta_pdf):
+                escribir_log(ruta_log, f"⚠️ PDF no encontrado: {nombre_archivo}")
+                if log_gui_callback:
+                    log_gui_callback(f"⚠️ PDF no encontrado: {nombre_archivo}", "warning")
                 continue
             
-            texto = texto_paginas[i]
+            # Validar fecha de contrato
+            fecha_contrato = info_secciones.get('fecha_contrato')
+            if not fecha_contrato:
+                escribir_log(ruta_log, f"⚠️ PDF sin fecha de contrato, se omite: {nombre_archivo}")
+                if log_gui_callback:
+                    log_gui_callback(f"⚠️ Omitido (sin fecha): {nombre_archivo}", "warning")
+                continue
             
-            # Patrón: "Fecha de creación: YYYY-MM-DD"
-            patron = r'Fecha de creación:\s*(\d{4})-(\d{2})-(\d{2})'
-            match = re.search(patron, texto, re.IGNORECASE)
+            # Crear carpeta individual para el trabajador
+            nombre_trabajador = os.path.splitext(nombre_archivo)[0]
+            carpeta_trabajador = obtener_carpeta_trabajador_unica(carpeta_salida, nombre_trabajador)
+            escribir_log(ruta_log, f"Carpeta de trabajador: {carpeta_trabajador}")
             
-            if match:
-                año = match.group(1)
-                mes = match.group(2)
-                # Formato: MM.YYYY
-                return f"{mes}.{año}"
+            # Procesar todas las secciones del PDF
+            exitos, errores_pdf, detalles = procesar_pdf_individual(
+                ruta_pdf,
+                nombre_archivo,
+                info_secciones,
+                carpeta_trabajador
+            )
+            
+            # Actualizar contadores globales
+            secciones_extraidas += exitos
+            errores += errores_pdf
+            
+            # Log de detalles
+            for nombre_seccion, estado, mensaje in detalles:
+                if estado == 'exito':
+                    escribir_log(ruta_log, f"  ✅ Extraído: {mensaje}")
+                    secciones_procesadas += 1
+                    
+                    # Actualizar progreso
+                    porcentaje = int((secciones_procesadas / total_secciones) * 100)
+                    if progress_callback:
+                        progress_callback(
+                            secciones_procesadas,
+                            total_secciones,
+                            f"Extrayendo: {nombre_seccion} - {nombre_trabajador}",
+                            porcentaje
+                        )
+                
+                elif estado == 'omitido':
+                    escribir_log(ruta_log, f"  ⏭️  Omitido: {nombre_seccion} ({mensaje})")
+                    secciones_omitidas += 1
+                
+                elif estado == 'error':
+                    escribir_log(ruta_log, f"  ❌ Error en {nombre_seccion}: {mensaje}")
+                    secciones_procesadas += 1
+                    
+                    # Actualizar progreso incluso con error
+                    porcentaje = int((secciones_procesadas / total_secciones) * 100)
+                    if progress_callback:
+                        progress_callback(
+                            secciones_procesadas,
+                            total_secciones,
+                            f"Error en: {nombre_seccion} - {nombre_trabajador}",
+                            porcentaje
+                        )
+            
+            # Log GUI por archivo
+            if log_gui_callback:
+                if exitos > 0:
+                    log_gui_callback(
+                        f"✅ {nombre_archivo}: {exitos} secciones extraídas",
+                        "success"
+                    )
+                if errores_pdf > 0:
+                    log_gui_callback(
+                        f"⚠️ {nombre_archivo}: {errores_pdf} errores",
+                        "warning"
+                    )
         
-        return None
+        # Finalizar
+        fin = datetime.now()
+        duracion = fin - inicio
+        duracion_str = format_duration(duracion.total_seconds())
+        
+        escribir_log(ruta_log, "\n" + "="*80)
+        escribir_log(ruta_log, "RESUMEN DE PROCESAMIENTO")
+        escribir_log(ruta_log, "="*80)
+        escribir_log(ruta_log, f"PDFs procesados: {total_archivos}")
+        escribir_log(ruta_log, f"Secciones extraídas: {secciones_extraidas}")
+        escribir_log(ruta_log, f"Secciones omitidas: {secciones_omitidas}")
+        escribir_log(ruta_log, f"Errores: {errores}")
+        escribir_log(ruta_log, f"Duración: {duracion_str}")
+        escribir_log(ruta_log, f"Fin: {fin.strftime('%Y-%m-%d %H:%M:%S')}")
+        
+        if log_gui_callback:
+            log_gui_callback("", "info")
+            log_gui_callback(
+                f"✅ Procesamiento completado: {secciones_extraidas} secciones extraídas",
+                "success"
+            )
+            if errores > 0:
+                log_gui_callback(f"⚠️ {errores} errores encontrados", "warning")
+        
+        return {
+            'exitoso': True,
+            'mensaje': f'Procesamiento exitoso: {secciones_extraidas} secciones extraídas',
+            'secciones_extraidas': secciones_extraidas,
+            'secciones_omitidas': secciones_omitidas,
+            'errores': errores,
+            'ruta_salida': carpeta_salida,
+            'ruta_log': ruta_log,
+            'duracion': duracion_str
+        }
+    
+    except Exception as e:
+        escribir_log(ruta_log, f"Error crítico en procesamiento: {str(e)}")
+        if log_gui_callback:
+            log_gui_callback(f"❌ Error crítico: {str(e)}", "error")
+        
+        return {
+            'exitoso': False,
+            'mensaje': f'Error crítico: {str(e)}',
+            'secciones_extraidas': 0,
+            'secciones_omitidas': 0,
+            'errores': 0,
+            'ruta_salida': '',
+            'ruta_log': ruta_log,
+            'duracion': '0s'
+        }

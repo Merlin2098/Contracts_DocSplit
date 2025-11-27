@@ -1,392 +1,642 @@
 """
-Controller para el workflow de Contratos.
-Maneja los 3 pasos: Normalizar, Diagnosticar, Procesar.
+Controlador para el módulo de Contratos.
+Ubicación: controllers/contratos_controller.py
+
+Orquesta las tres fases del workflow:
+1. Normalizar: Renombra PDFs según nombre del trabajador
+2. Diagnosticar: Detecta las 12 secciones y genera JSON consolidado
+3. Procesar: Extrae secciones individuales basándose en el JSON
 """
 
 import os
-import time
-from core.contratos.normalizer import (
-    normalizar_nombre_pdf,
-    generar_nombre_unico,
-    validar_archivos_pdf
-)
+import json
+from datetime import datetime
+from core.contratos.normalizer import normalizar_nombre_pdf, generar_nombre_unico
 from core.contratos.section_detector import SectionDetector
 from core.contratos.json_generator import JSONGenerator
-from core.utils.file_utils import validar_carpeta_entrada
+from core.contratos.processor import (
+    procesar_pdf_individual,
+    obtener_carpeta_trabajador_unica,
+    validar_json_diagnostico,
+    calcular_total_secciones
+)
 from core.utils.logger import (
+    obtener_directorio_logs,
+    generar_nombre_log_con_timestamp,
     escribir_log,
     crear_log_header,
-    generar_nombre_log_con_timestamp,
-    format_duration,
-    obtener_directorio_logs
+    format_duration
 )
 
 
 def normalizar_contratos(carpeta_entrada, progress_callback=None, log_gui_callback=None):
     """
-    Normaliza los nombres de archivos PDF en la carpeta.
-    Paso 1 del workflow de Contratos.
-    
-    Proceso:
-    1. Valida carpeta de entrada
-    2. Para cada PDF:
-       - Extrae nombre entre guiones
-       - Genera nombre único si hay conflicto
-       - Renombra archivo
-    3. Genera log con timestamp
-    4. Mide tiempo de ejecución
+    Fase 1: Normaliza los nombres de los PDFs de contratos.
     
     Args:
-        carpeta_entrada (str): Ruta de la carpeta con PDFs
-        progress_callback (callable): Función callback para actualizar progreso
-                                     Firma: callback(current, total, message, percentage)
-        log_gui_callback (callable): Función callback para logs de interfaz
-                                     Firma: callback(mensaje, tipo)
+        carpeta_entrada (str): Ruta de la carpeta con los PDFs
+        progress_callback (callable): Función para reportar progreso
+            Firma: progress_callback(current, total, message, percentage)
+        log_gui_callback (callable): Función para enviar logs a la GUI
+            Firma: log_gui_callback(mensaje, tipo)
     
     Returns:
-        dict: Resultado del procesamiento con estructura:
-              {
-                  'exitoso': bool,
-                  'mensaje': str,
-                  'archivos_normalizados': int,
-                  'archivos_sin_cambios': int,
-                  'total': int,
-                  'duracion': str,
-                  'ruta_log': str
-              }
+        dict: {
+            'exitoso': bool,
+            'mensaje': str,
+            'archivos_normalizados': int,
+            'ruta_log': str,
+            'duracion': str
+        }
     """
-    # Iniciar medición de tiempo
-    tiempo_inicio = time.time()
+    inicio = datetime.now()
     
-    # --- 1. Validación inicial ---
-    es_valida, mensaje, archivos_pdf = validar_carpeta_entrada(carpeta_entrada)
+    # Inicializar logger usando la estructura correcta
+    carpeta_logs = obtener_directorio_logs("contratos", crear=True)
+    ruta_log = generar_nombre_log_con_timestamp("normalizacion", carpeta_logs)
+    crear_log_header(ruta_log, "NORMALIZACIÓN DE CONTRATOS")
     
-    if not es_valida:
+    try:
+        escribir_log(ruta_log, "="*80)
+        escribir_log(ruta_log, "INICIO DE NORMALIZACIÓN DE CONTRATOS")
+        escribir_log(ruta_log, "="*80)
+        escribir_log(ruta_log, f"Carpeta de entrada: {carpeta_entrada}")
+        
+        # Verificar que la carpeta existe
+        if not os.path.isdir(carpeta_entrada):
+            mensaje = f"La carpeta no existe: {carpeta_entrada}"
+            escribir_log(ruta_log, f"ERROR: {mensaje}")
+            if log_gui_callback:
+                log_gui_callback(f"❌ {mensaje}", "error")
+            
+            return {
+                'exitoso': False,
+                'mensaje': mensaje,
+                'archivos_normalizados': 0,
+                'ruta_log': ruta_log,
+                'duracion': '0s'
+            }
+        
+        # Listar PDFs
+        archivos = [f for f in os.listdir(carpeta_entrada) if f.lower().endswith('.pdf')]
+        total_archivos = len(archivos)
+        
+        escribir_log(ruta_log, f"PDFs detectados: {total_archivos}")
+        
+        if log_gui_callback:
+            log_gui_callback(f"📁 Carpeta: {carpeta_entrada}", "info")
+            log_gui_callback(f"📄 PDFs encontrados: {total_archivos}", "info")
+            log_gui_callback("", "info")
+        
+        if total_archivos == 0:
+            mensaje = "No se encontraron archivos PDF en la carpeta"
+            escribir_log(ruta_log, f"WARNING: {mensaje}")
+            if log_gui_callback:
+                log_gui_callback(f"⚠️ {mensaje}", "warning")
+            
+            return {
+                'exitoso': False,
+                'mensaje': mensaje,
+                'archivos_normalizados': 0,
+                'ruta_log': ruta_log,
+                'duracion': '0s'
+            }
+        
+        # Inicializar contadores
+        archivos_normalizados = 0
+        
+        # Procesar cada PDF
+        for idx, archivo in enumerate(archivos, 1):
+            ruta_completa = os.path.join(carpeta_entrada, archivo)
+            
+            # Actualizar progreso
+            porcentaje = int((idx / total_archivos) * 100)
+            if progress_callback:
+                progress_callback(idx, total_archivos, f"Procesando: {archivo}", porcentaje)
+            
+            escribir_log(ruta_log, f"\n--- Procesando [{idx}/{total_archivos}]: {archivo} ---")
+            
+            try:
+                # Normalizar nombre
+                nombre_normalizado, fue_modificado = normalizar_nombre_pdf(archivo)
+                
+                if fue_modificado:
+                    # Generar nombre único si ya existe
+                    nombre_sin_ext = os.path.splitext(nombre_normalizado)[0]
+                    nombre_final = generar_nombre_unico(carpeta_entrada, nombre_sin_ext, ".pdf")
+                    ruta_nueva = os.path.join(carpeta_entrada, nombre_final)
+                    
+                    # Renombrar archivo
+                    os.rename(ruta_completa, ruta_nueva)
+                    archivos_normalizados += 1
+                    
+                    escribir_log(ruta_log, f"✅ Normalizado: {archivo} → {nombre_final}")
+                    
+                    if log_gui_callback:
+                        log_gui_callback(
+                            f"✅ [{idx}/{total_archivos}] Renombrado: {archivo} → {nombre_final}", 
+                            "success"
+                        )
+                else:
+                    escribir_log(ruta_log, f"✅ Ya normalizado: {archivo}")
+                    if log_gui_callback:
+                        log_gui_callback(
+                            f"✅ [{idx}/{total_archivos}] Ya normalizado: {archivo}", 
+                            "info"
+                        )
+            
+            except Exception as e:
+                escribir_log(ruta_log, f"❌ Error procesando {archivo}: {str(e)}")
+                if log_gui_callback:
+                    log_gui_callback(
+                        f"❌ [{idx}/{total_archivos}] Error en {archivo}: {str(e)}", 
+                        "error"
+                    )
+        
+        # Finalizar
+        fin = datetime.now()
+        duracion = fin - inicio
+        duracion_str = format_duration(duracion.total_seconds())
+        
+        escribir_log(ruta_log, "\n" + "="*80)
+        escribir_log(ruta_log, "RESUMEN DE NORMALIZACIÓN")
+        escribir_log(ruta_log, "="*80)
+        escribir_log(ruta_log, f"Archivos procesados: {total_archivos}")
+        escribir_log(ruta_log, f"Archivos normalizados: {archivos_normalizados}")
+        escribir_log(ruta_log, f"Duración: {duracion_str}")
+        escribir_log(ruta_log, f"Fin: {fin.strftime('%Y-%m-%d %H:%M:%S')}")
+        
+        if log_gui_callback:
+            log_gui_callback("", "info")
+            log_gui_callback(f"✅ Normalización completada: {archivos_normalizados}/{total_archivos} archivos", "success")
+        
         return {
-            'exitoso': False,
-            'mensaje': mensaje,
-            'archivos_normalizados': 0,
-            'archivos_sin_cambios': 0,
-            'total': 0,
-            'duracion': '0s',
-            'ruta_log': None
+            'exitoso': True,
+            'mensaje': f'Normalización exitosa: {archivos_normalizados}/{total_archivos} archivos',
+            'archivos_normalizados': archivos_normalizados,
+            'ruta_log': ruta_log,
+            'duracion': duracion_str
         }
     
-    # --- 2. Inicializar variables ---
-    total_archivos = len(archivos_pdf)
-    normalizados = 0
-    sin_cambios = 0
-    
-    # Generar nombre de log con timestamp en carpeta centralizada
-    logs_dir = obtener_directorio_logs("contratos")
-    ruta_log = generar_nombre_log_con_timestamp("normalizacion", logs_dir)
-    
-    # --- 3. Inicializar log ---
-    crear_log_header(ruta_log, "NORMALIZACIÓN DE NOMBRES - CONTRATOS")
-    escribir_log(ruta_log, f"Carpeta: {carpeta_entrada}")
-    escribir_log(ruta_log, f"Total de archivos: {total_archivos}\n")
-    
-    # Log GUI inicial
-    if log_gui_callback:
-        log_gui_callback(f"📂 Carpeta seleccionada: {carpeta_entrada}", "info")
-        log_gui_callback(f"📊 Total de archivos: {total_archivos}", "info")
-        log_gui_callback("", "info")
-    
-    # --- 4. Procesar cada PDF ---
-    for idx, archivo in enumerate(archivos_pdf, 1):
-        try:
-            # Actualizar progreso
-            if progress_callback:
-                progress = int((idx / total_archivos) * 100)
-                progress_callback(idx, total_archivos, f"Normalizando: {archivo}", progress)
-            
-            # Normalizar nombre
-            nombre_normalizado, fue_modificado = normalizar_nombre_pdf(archivo)
-            
-            if not fue_modificado:
-                # No requiere cambios
-                escribir_log(ruta_log, f"[{idx}/{total_archivos}] ⏭️ {archivo} → Sin cambios")
-                if log_gui_callback:
-                    log_gui_callback(f"⏭️ Archivo {idx}: Sin cambios necesarios", "info")
-                sin_cambios += 1
-                continue
-            
-            # Generar nombre único para evitar sobrescribir
-            nombre_base = os.path.splitext(nombre_normalizado)[0]
-            extension = os.path.splitext(nombre_normalizado)[1]
-            nombre_final = generar_nombre_unico(carpeta_entrada, nombre_base, extension)
-            
-            # Renombrar archivo
-            ruta_original = os.path.join(carpeta_entrada, archivo)
-            ruta_nueva = os.path.join(carpeta_entrada, nombre_final)
-            
-            os.rename(ruta_original, ruta_nueva)
-            
-            # Log
-            escribir_log(ruta_log, f"[{idx}/{total_archivos}] ✅ {archivo} → {nombre_final}")
-            if log_gui_callback:
-                log_gui_callback(f"✅ Archivo {idx}: Normalizado correctamente", "success")
-            
-            normalizados += 1
-            
-        except Exception as e:
-            escribir_log(ruta_log, f"[{idx}/{total_archivos}] ❌ ERROR en {archivo}: {str(e)}")
-            if log_gui_callback:
-                log_gui_callback(f"❌ Archivo {idx}: Error al normalizar", "error")
-    
-    # --- 5. Calcular duración ---
-    tiempo_fin = time.time()
-    duracion_segundos = tiempo_fin - tiempo_inicio
-    duracion_formateada = format_duration(duracion_segundos)
-    
-    # --- 6. Finalizar log ---
-    escribir_log(ruta_log, "")
-    escribir_log(ruta_log, "="*50)
-    escribir_log(ruta_log, "RESUMEN FINAL")
-    escribir_log(ruta_log, "="*50)
-    escribir_log(ruta_log, f"⏱️ Tiempo total: {duracion_formateada}")
-    escribir_log(ruta_log, f"✅ Archivos normalizados: {normalizados}")
-    escribir_log(ruta_log, f"⏭️ Archivos sin cambios: {sin_cambios}")
-    escribir_log(ruta_log, f"📊 Total procesados: {total_archivos}")
-    escribir_log(ruta_log, "="*50)
-    
-    # Log GUI final
-    if log_gui_callback:
-        log_gui_callback("", "info")
-        log_gui_callback("="*50, "info")
-        log_gui_callback("✅ NORMALIZACIÓN COMPLETADA", "success")
-        log_gui_callback("="*50, "info")
-        log_gui_callback(f"⏱️ Tiempo total: {duracion_formateada}", "info")
-        log_gui_callback(f"✅ Archivos normalizados: {normalizados}", "success")
-        log_gui_callback(f"⏭️ Archivos sin cambios: {sin_cambios}", "info")
-        log_gui_callback(f"📊 Total procesados: {total_archivos}", "info")
-    
-    # Actualizar progreso final
-    if progress_callback:
-        progress_callback(total_archivos, total_archivos, "Normalización completada", 100)
-    
-    # --- 7. Retornar resultado ---
-    return {
-        'exitoso': True,
-        'mensaje': f'Normalización completada: {normalizados} archivos renombrados',
-        'archivos_normalizados': normalizados,
-        'archivos_sin_cambios': sin_cambios,
-        'total': total_archivos,
-        'duracion': duracion_formateada,
-        'ruta_log': ruta_log
-    }
+    except Exception as e:
+        escribir_log(ruta_log, f"Error crítico en normalización: {str(e)}")
+        if log_gui_callback:
+            log_gui_callback(f"❌ Error crítico: {str(e)}", "error")
+        
+        return {
+            'exitoso': False,
+            'mensaje': f'Error crítico: {str(e)}',
+            'archivos_normalizados': 0,
+            'ruta_log': ruta_log,
+            'duracion': '0s'
+        }
 
 
 def diagnosticar_contratos(carpeta_entrada, progress_callback=None, log_gui_callback=None):
     """
-    Detecta las 12 secciones en cada PDF y genera JSON consolidado.
-    Paso 2 del workflow de Contratos.
-    
-    Proceso:
-    1. Valida carpeta y lista PDFs normalizados
-    2. Por cada PDF:
-       - Instancia SectionDetector
-       - Detecta 12 secciones + fecha + ancla
-       - Acumula en JSONGenerator
-       - Actualiza progreso y logs
-    3. Genera diagnostico_rangos.json
-    4. Genera logs (interfaz + técnico)
+    Fase 2: Diagnostica las secciones de los contratos y genera JSON consolidado.
     
     Args:
-        carpeta_entrada (str): Ruta de la carpeta con PDFs normalizados
-        progress_callback (callable): Función callback para actualizar progreso
-                                     Firma: callback(current, total, message, percentage)
-        log_gui_callback (callable): Función callback para logs de interfaz
-                                     Firma: callback(mensaje, tipo)
+        carpeta_entrada (str): Ruta de la carpeta con los PDFs normalizados
+        progress_callback (callable): Función para reportar progreso
+        log_gui_callback (callable): Función para enviar logs a la GUI
     
     Returns:
-        dict: Resultado del procesamiento con estructura:
-              {
-                  'exitoso': bool,
-                  'mensaje': str,
-                  'total_archivos': int,
-                  'secciones_detectadas': int,
-                  'secciones_faltantes': int,
-                  'json_generado': str,
-                  'duracion': str,
-                  'ruta_log': str
-              }
-    """
-    # Iniciar medición de tiempo
-    tiempo_inicio = time.time()
-    
-    # --- 1. Validación inicial ---
-    es_valida, mensaje, archivos_pdf = validar_carpeta_entrada(carpeta_entrada)
-    
-    if not es_valida:
-        return {
-            'exitoso': False,
-            'mensaje': mensaje,
-            'total_archivos': 0,
-            'secciones_detectadas': 0,
-            'secciones_faltantes': 0,
-            'json_generado': '',
-            'duracion': '0s',
-            'ruta_log': None
+        dict: {
+            'exitoso': bool,
+            'mensaje': str,
+            'secciones_detectadas': int,
+            'secciones_faltantes': int,
+            'ruta_json': str,
+            'ruta_log': str,
+            'duracion': str
         }
+    """
+    inicio = datetime.now()
     
-    # --- 2. Inicializar variables ---
-    total_archivos = len(archivos_pdf)
-    
-    # Generar nombre de log con timestamp
-    logs_dir = obtener_directorio_logs("contratos")
-    ruta_log = generar_nombre_log_con_timestamp("diagnostico", logs_dir)
-    
-    # --- 3. Inicializar log ---
-    crear_log_header(ruta_log, "DIAGNÓSTICO DE SECCIONES - CONTRATOS")
-    escribir_log(ruta_log, f"Carpeta: {carpeta_entrada}")
-    escribir_log(ruta_log, f"Total de archivos: {total_archivos}\n")
-    
-    # Log GUI inicial
-    if log_gui_callback:
-        log_gui_callback(f"📂 Carpeta seleccionada: {carpeta_entrada}", "info")
-        log_gui_callback(f"📊 Total de archivos: {total_archivos}", "info")
-        log_gui_callback("", "info")
-    
-    # --- 4. Inicializar generador JSON ---
-    json_gen = JSONGenerator()
-    
-    # --- 5. Procesar cada PDF ---
-    for idx, archivo in enumerate(archivos_pdf, 1):
-        try:
-            ruta_pdf = os.path.join(carpeta_entrada, archivo)
-            
-            # Actualizar progreso
-            if progress_callback:
-                progress = int((idx / total_archivos) * 100)
-                progress_callback(idx, total_archivos, f"Analizando: {archivo}", progress)
-            
-            # Log
-            escribir_log(ruta_log, f"\n{'='*80}")
-            escribir_log(ruta_log, f"[{idx}/{total_archivos}] 📄 Archivo: {archivo}")
-            
-            if log_gui_callback:
-                log_gui_callback(f"\n🔍 Analizando: {archivo}", "info")
-            
-            # Detectar secciones
-            detector = SectionDetector(ruta_pdf)
-            info = detector.detectar_todas_secciones()
-            
-            # Agregar al JSON
-            json_gen.agregar_archivo(archivo, info)
-            
-            # Contar secciones detectadas
-            secciones_detectadas = sum(1 for s in info['secciones'].values() if s is not None)
-            secciones_faltantes = 12 - secciones_detectadas
-            
-            # Logs detallados
-            escribir_log(ruta_log, f"Total de páginas: {detector.total_paginas}")
-            escribir_log(ruta_log, f"Fecha del contrato: {info['fecha_contrato'] or '❌ No detectada'}")
-            escribir_log(ruta_log, f"Secciones detectadas: {secciones_detectadas}/12")
-            escribir_log(ruta_log, "")
-            
-            # Log detallado de secciones
-            for nombre_seccion, rango in info['secciones'].items():
-                if rango is not None:
-                    escribir_log(ruta_log, f"  ✅ {nombre_seccion:<60} Páginas {rango['inicio']}-{rango['fin']}")
-                else:
-                    escribir_log(ruta_log, f"  ❌ {nombre_seccion:<60} No detectado")
-            
-            # Log GUI resumido
-            if log_gui_callback:
-                estado = "success" if secciones_detectadas >= 10 else "warning"
-                log_gui_callback(f"  ✅ Detectadas: {secciones_detectadas}/12 secciones", estado)
-                
-                if info['fecha_contrato']:
-                    log_gui_callback(f"  📅 Fecha: {info['fecha_contrato']}", "info")
-                else:
-                    log_gui_callback(f"  ⚠️ Fecha no detectada", "warning")
-                
-            
-        except Exception as e:
-            escribir_log(ruta_log, f"[{idx}/{total_archivos}] ❌ ERROR en {archivo}: {str(e)}")
-            if log_gui_callback:
-                log_gui_callback(f"❌ Error en {archivo}: {str(e)}", "error")
-    
-    # --- 6. Generar JSON consolidado ---
-    json_path = os.path.join(carpeta_entrada, "diagnostico_rangos.json")
+    # Inicializar logger usando la estructura correcta
+    carpeta_logs = obtener_directorio_logs("contratos", crear=True)
+    ruta_log = generar_nombre_log_con_timestamp("diagnostico", carpeta_logs)
+    crear_log_header(ruta_log, "DIAGNÓSTICO DE CONTRATOS")
     
     try:
-        json_gen.generar_json_consolidado(json_path)
-        escribir_log(ruta_log, f"\n✅ JSON generado: {json_path}")
+        escribir_log(ruta_log, "="*80)
+        escribir_log(ruta_log, "INICIO DE DIAGNÓSTICO DE CONTRATOS")
+        escribir_log(ruta_log, "="*80)
+        escribir_log(ruta_log, f"Carpeta de entrada: {carpeta_entrada}")
+        
+        # Verificar carpeta
+        if not os.path.isdir(carpeta_entrada):
+            mensaje = f"La carpeta no existe: {carpeta_entrada}"
+            escribir_log(ruta_log, f"ERROR: {mensaje}")
+            if log_gui_callback:
+                log_gui_callback(f"❌ {mensaje}", "error")
+            
+            return {
+                'exitoso': False,
+                'mensaje': mensaje,
+                'secciones_detectadas': 0,
+                'secciones_faltantes': 0,
+                'ruta_json': '',
+                'ruta_log': ruta_log,
+                'duracion': '0s'
+            }
+        
+        # Listar PDFs
+        archivos = [f for f in os.listdir(carpeta_entrada) if f.lower().endswith('.pdf')]
+        total_archivos = len(archivos)
+        
+        escribir_log(ruta_log, f"PDFs detectados: {total_archivos}")
+        
+        if log_gui_callback:
+            log_gui_callback(f"📁 Carpeta: {carpeta_entrada}", "info")
+            log_gui_callback(f"📄 PDFs encontrados: {total_archivos}", "info")
+            log_gui_callback("", "info")
+        
+        if total_archivos == 0:
+            mensaje = "No se encontraron archivos PDF en la carpeta"
+            escribir_log(ruta_log, f"WARNING: {mensaje}")
+            if log_gui_callback:
+                log_gui_callback(f"⚠️ {mensaje}", "warning")
+            
+            return {
+                'exitoso': False,
+                'mensaje': mensaje,
+                'secciones_detectadas': 0,
+                'secciones_faltantes': 0,
+                'ruta_json': '',
+                'ruta_log': ruta_log,
+                'duracion': '0s'
+            }
+        
+        # Inicializar generador JSON
+        json_gen = JSONGenerator()
+        
+        # Procesar cada PDF
+        for idx, archivo in enumerate(archivos, 1):
+            ruta_completa = os.path.join(carpeta_entrada, archivo)
+            
+            # Actualizar progreso
+            porcentaje = int((idx / total_archivos) * 100)
+            if progress_callback:
+                progress_callback(idx, total_archivos, f"Diagnosticando: {archivo}", porcentaje)
+            
+            escribir_log(ruta_log, f"\n--- Diagnosticando [{idx}/{total_archivos}]: {archivo} ---")
+            
+            try:
+                # Inicializar detector con la ruta del PDF
+                detector = SectionDetector(ruta_completa)
+                
+                # Detectar secciones
+                resultado = detector.detectar_todas_secciones()
+                
+                # Agregar al JSON consolidado
+                json_gen.agregar_archivo(archivo, resultado)
+                
+                # Contar detecciones
+                secciones = resultado.get('secciones', {})
+                detectadas = sum(1 for r in secciones.values() if r is not None)
+                faltantes = sum(1 for r in secciones.values() if r is None)
+                
+                escribir_log(ruta_log, f"Secciones detectadas: {detectadas}/12")
+                escribir_log(ruta_log, f"Fecha contrato: {resultado.get('fecha_contrato', 'No detectada')}")
+                
+                if log_gui_callback:
+                    log_gui_callback(
+                        f"✅ [{idx}/{total_archivos}] {archivo}: {detectadas}/12 secciones detectadas",
+                        "success" if detectadas >= 10 else "warning"
+                    )
+            
+            except Exception as e:
+                escribir_log(ruta_log, f"❌ Error diagnosticando {archivo}: {str(e)}")
+                if log_gui_callback:
+                    log_gui_callback(
+                        f"❌ [{idx}/{total_archivos}] Error en {archivo}: {str(e)}",
+                        "error"
+                    )
+        
+        # Generar JSON consolidado
+        ruta_json = os.path.join(carpeta_entrada, "diagnostico_rangos.json")
+        json_gen.generar_json_consolidado(ruta_json)
+        
+        escribir_log(ruta_log, f"\n✅ JSON consolidado generado: {ruta_json}")
+        
+        # Obtener resumen
+        resumen = json_gen.obtener_resumen()
+        
+        # Finalizar
+        fin = datetime.now()
+        duracion = fin - inicio
+        duracion_str = format_duration(duracion.total_seconds())
+        
+        escribir_log(ruta_log, "\n" + "="*80)
+        escribir_log(ruta_log, "RESUMEN DE DIAGNÓSTICO")
+        escribir_log(ruta_log, "="*80)
+        escribir_log(ruta_log, f"Archivos procesados: {resumen['total_archivos']}")
+        escribir_log(ruta_log, f"Secciones detectadas: {resumen['total_secciones_detectadas']}")
+        escribir_log(ruta_log, f"Secciones faltantes: {resumen['total_secciones_faltantes']}")
+        escribir_log(ruta_log, f"Duración: {duracion_str}")
+        escribir_log(ruta_log, f"Fin: {fin.strftime('%Y-%m-%d %H:%M:%S')}")
         
         if log_gui_callback:
             log_gui_callback("", "info")
-            log_gui_callback(f"✅ JSON generado: {json_path}", "success")
+            log_gui_callback(f"✅ Diagnóstico completado: {resumen['total_secciones_detectadas']} secciones detectadas", "success")
+            log_gui_callback(f"📄 JSON generado: {ruta_json}", "info")
+        
+        return {
+            'exitoso': True,
+            'mensaje': f"Diagnóstico exitoso: {resumen['total_secciones_detectadas']} secciones detectadas",
+            'secciones_detectadas': resumen['total_secciones_detectadas'],
+            'secciones_faltantes': resumen['total_secciones_faltantes'],
+            'ruta_json': ruta_json,
+            'ruta_log': ruta_log,
+            'duracion': duracion_str
+        }
+    
     except Exception as e:
-        escribir_log(ruta_log, f"\n❌ ERROR al generar JSON: {str(e)}")
+        escribir_log(ruta_log, f"Error crítico en diagnóstico: {str(e)}")
         if log_gui_callback:
-            log_gui_callback(f"❌ Error al generar JSON: {str(e)}", "error")
+            log_gui_callback(f"❌ Error crítico: {str(e)}", "error")
         
         return {
             'exitoso': False,
-            'mensaje': f'Error al generar JSON: {str(e)}',
-            'total_archivos': total_archivos,
+            'mensaje': f'Error crítico: {str(e)}',
             'secciones_detectadas': 0,
             'secciones_faltantes': 0,
-            'json_generado': '',
-            'duracion': '0s',
-            'ruta_log': ruta_log
+            'ruta_json': '',
+            'ruta_log': ruta_log,
+            'duracion': '0s'
+        }
+
+
+def procesar_contratos(carpeta_entrada, progress_callback=None, log_gui_callback=None):
+    """
+    Fase 3: Extrae secciones individuales basándose en el JSON de diagnóstico.
+    
+    Args:
+        carpeta_entrada (str): Ruta de la carpeta con los PDFs y el JSON
+        progress_callback (callable): Función para reportar progreso
+            Firma: progress_callback(current, total, message, percentage)
+        log_gui_callback (callable): Función para enviar logs a la GUI
+            Firma: log_gui_callback(mensaje, tipo)
+    
+    Returns:
+        dict: {
+            'exitoso': bool,
+            'mensaje': str,
+            'secciones_extraidas': int,
+            'secciones_omitidas': int,
+            'errores': int,
+            'ruta_salida': str,
+            'ruta_log': str,
+            'duracion': str
+        }
+    """
+    inicio = datetime.now()
+    
+    # Inicializar logger usando la estructura correcta
+    carpeta_logs = obtener_directorio_logs("contratos", crear=True)
+    ruta_log = generar_nombre_log_con_timestamp("procesamiento", carpeta_logs)
+    crear_log_header(ruta_log, "PROCESAMIENTO DE CONTRATOS")
+    
+    try:
+        escribir_log(ruta_log, "="*80)
+        escribir_log(ruta_log, "INICIO DE PROCESAMIENTO DE CONTRATOS")
+        escribir_log(ruta_log, "="*80)
+        escribir_log(ruta_log, f"Carpeta de entrada: {carpeta_entrada}")
+        
+        # Validar carpeta
+        if not os.path.isdir(carpeta_entrada):
+            mensaje = f"La carpeta no existe: {carpeta_entrada}"
+            escribir_log(ruta_log, f"ERROR: {mensaje}")
+            if log_gui_callback:
+                log_gui_callback(f"❌ {mensaje}", "error")
+            
+            return {
+                'exitoso': False,
+                'mensaje': mensaje,
+                'secciones_extraidas': 0,
+                'secciones_omitidas': 0,
+                'errores': 0,
+                'ruta_salida': '',
+                'ruta_log': ruta_log,
+                'duracion': '0s'
+            }
+        
+        # Validar existencia del JSON de diagnóstico
+        ruta_json = os.path.join(carpeta_entrada, "diagnostico_rangos.json")
+        if not os.path.exists(ruta_json):
+            mensaje = "No se encontró el archivo 'diagnostico_rangos.json'. Ejecute primero el diagnóstico."
+            escribir_log(ruta_log, f"ERROR: {mensaje}")
+            if log_gui_callback:
+                log_gui_callback(f"❌ {mensaje}", "error")
+            
+            return {
+                'exitoso': False,
+                'mensaje': mensaje,
+                'secciones_extraidas': 0,
+                'secciones_omitidas': 0,
+                'errores': 0,
+                'ruta_salida': '',
+                'ruta_log': ruta_log,
+                'duracion': '0s'
+            }
+        
+        # Cargar JSON
+        escribir_log(ruta_log, f"Cargando JSON: {ruta_json}")
+        try:
+            with open(ruta_json, 'r', encoding='utf-8') as f:
+                datos_json = json.load(f)
+        except json.JSONDecodeError as e:
+            mensaje = f"Error al leer JSON: {str(e)}"
+            escribir_log(ruta_log, f"ERROR: {mensaje}")
+            if log_gui_callback:
+                log_gui_callback(f"❌ {mensaje}", "error")
+            
+            return {
+                'exitoso': False,
+                'mensaje': mensaje,
+                'secciones_extraidas': 0,
+                'secciones_omitidas': 0,
+                'errores': 0,
+                'ruta_salida': '',
+                'ruta_log': ruta_log,
+                'duracion': '0s'
+            }
+        
+        # Validar estructura del JSON
+        es_valido, mensaje_error = validar_json_diagnostico(datos_json)
+        if not es_valido:
+            escribir_log(ruta_log, f"ERROR: JSON inválido: {mensaje_error}")
+            if log_gui_callback:
+                log_gui_callback(f"❌ JSON inválido: {mensaje_error}", "error")
+            
+            return {
+                'exitoso': False,
+                'mensaje': f'JSON inválido: {mensaje_error}',
+                'secciones_extraidas': 0,
+                'secciones_omitidas': 0,
+                'errores': 0,
+                'ruta_salida': '',
+                'ruta_log': ruta_log,
+                'duracion': '0s'
+            }
+        
+        total_archivos = len(datos_json)
+        escribir_log(ruta_log, f"PDFs a procesar: {total_archivos}")
+        
+        if log_gui_callback:
+            log_gui_callback(f"📁 Carpeta: {carpeta_entrada}", "info")
+            log_gui_callback(f"📄 PDFs a procesar: {total_archivos}", "info")
+            log_gui_callback("", "info")
+        
+        # Crear carpeta de salida
+        carpeta_salida = os.path.join(carpeta_entrada, "pdfs_extraidos")
+        os.makedirs(carpeta_salida, exist_ok=True)
+        escribir_log(ruta_log, f"Carpeta de salida: {carpeta_salida}")
+        
+        # Calcular total de secciones a procesar
+        total_secciones = calcular_total_secciones(datos_json)
+        escribir_log(ruta_log, f"Total de secciones a extraer: {total_secciones}")
+        
+        # Contadores
+        secciones_extraidas = 0
+        secciones_omitidas = 0
+        errores = 0
+        secciones_procesadas = 0
+        
+        # Procesar cada PDF
+        for nombre_archivo, info_secciones in datos_json.items():
+            ruta_pdf = os.path.join(carpeta_entrada, nombre_archivo)
+            
+            escribir_log(ruta_log, f"\n--- Procesando: {nombre_archivo} ---")
+            
+            # Validar que el PDF original existe
+            if not os.path.exists(ruta_pdf):
+                escribir_log(ruta_log, f"⚠️ PDF no encontrado: {nombre_archivo}")
+                if log_gui_callback:
+                    log_gui_callback(f"⚠️ PDF no encontrado: {nombre_archivo}", "warning")
+                continue
+            
+            # Validar fecha de contrato
+            fecha_contrato = info_secciones.get('fecha_contrato')
+            if not fecha_contrato:
+                escribir_log(ruta_log, f"⚠️ PDF sin fecha de contrato, se omite: {nombre_archivo}")
+                if log_gui_callback:
+                    log_gui_callback(f"⚠️ Omitido (sin fecha): {nombre_archivo}", "warning")
+                continue
+            
+            # Crear carpeta individual para el trabajador
+            nombre_trabajador = os.path.splitext(nombre_archivo)[0]
+            carpeta_trabajador = obtener_carpeta_trabajador_unica(carpeta_salida, nombre_trabajador)
+            escribir_log(ruta_log, f"Carpeta de trabajador: {carpeta_trabajador}")
+            
+            # Procesar todas las secciones del PDF
+            exitos, errores_pdf, detalles = procesar_pdf_individual(
+                ruta_pdf,
+                nombre_archivo,
+                info_secciones,
+                carpeta_trabajador
+            )
+            
+            # Actualizar contadores globales
+            secciones_extraidas += exitos
+            errores += errores_pdf
+            
+            # Log de detalles
+            for nombre_seccion, estado, mensaje in detalles:
+                if estado == 'exito':
+                    escribir_log(ruta_log, f"  ✅ Extraído: {mensaje}")
+                    secciones_procesadas += 1
+                    
+                    # Actualizar progreso
+                    porcentaje = int((secciones_procesadas / total_secciones) * 100)
+                    if progress_callback:
+                        progress_callback(
+                            secciones_procesadas,
+                            total_secciones,
+                            f"Extrayendo: {nombre_seccion} - {nombre_trabajador}",
+                            porcentaje
+                        )
+                
+                elif estado == 'omitido':
+                    escribir_log(ruta_log, f"  ⏭️  Omitido: {nombre_seccion} ({mensaje})")
+                    secciones_omitidas += 1
+                
+                elif estado == 'error':
+                    escribir_log(ruta_log, f"  ❌ Error en {nombre_seccion}: {mensaje}")
+                    secciones_procesadas += 1
+                    
+                    # Actualizar progreso incluso con error
+                    porcentaje = int((secciones_procesadas / total_secciones) * 100)
+                    if progress_callback:
+                        progress_callback(
+                            secciones_procesadas,
+                            total_secciones,
+                            f"Error en: {nombre_seccion} - {nombre_trabajador}",
+                            porcentaje
+                        )
+            
+            # Log GUI por archivo
+            if log_gui_callback:
+                if exitos > 0:
+                    log_gui_callback(
+                        f"✅ {nombre_archivo}: {exitos} secciones extraídas",
+                        "success"
+                    )
+                if errores_pdf > 0:
+                    log_gui_callback(
+                        f"⚠️ {nombre_archivo}: {errores_pdf} errores",
+                        "warning"
+                    )
+        
+        # Finalizar
+        fin = datetime.now()
+        duracion = fin - inicio
+        duracion_str = format_duration(duracion.total_seconds())
+        
+        escribir_log(ruta_log, "\n" + "="*80)
+        escribir_log(ruta_log, "RESUMEN DE PROCESAMIENTO")
+        escribir_log(ruta_log, "="*80)
+        escribir_log(ruta_log, f"PDFs procesados: {total_archivos}")
+        escribir_log(ruta_log, f"Secciones extraídas: {secciones_extraidas}")
+        escribir_log(ruta_log, f"Secciones omitidas: {secciones_omitidas}")
+        escribir_log(ruta_log, f"Errores: {errores}")
+        escribir_log(ruta_log, f"Duración: {duracion_str}")
+        escribir_log(ruta_log, f"Fin: {fin.strftime('%Y-%m-%d %H:%M:%S')}")
+        
+        if log_gui_callback:
+            log_gui_callback("", "info")
+            log_gui_callback(
+                f"✅ Procesamiento completado: {secciones_extraidas} secciones extraídas",
+                "success"
+            )
+            if errores > 0:
+                log_gui_callback(f"⚠️ {errores} errores encontrados", "warning")
+        
+        return {
+            'exitoso': True,
+            'mensaje': f'Procesamiento exitoso: {secciones_extraidas} secciones extraídas',
+            'secciones_extraidas': secciones_extraidas,
+            'secciones_omitidas': secciones_omitidas,
+            'errores': errores,
+            'ruta_salida': carpeta_salida,
+            'ruta_log': ruta_log,
+            'duracion': duracion_str
         }
     
-    # --- 7. Obtener resumen ---
-    resumen = json_gen.obtener_resumen()
-    
-    # --- 8. Calcular duración ---
-    tiempo_fin = time.time()
-    duracion_segundos = tiempo_fin - tiempo_inicio
-    duracion_formateada = format_duration(duracion_segundos)
-    
-    # --- 9. Finalizar log ---
-    escribir_log(ruta_log, "")
-    escribir_log(ruta_log, "="*80)
-    escribir_log(ruta_log, "RESUMEN FINAL")
-    escribir_log(ruta_log, "="*80)
-    escribir_log(ruta_log, f"⏱️ Tiempo total: {duracion_formateada}")
-    escribir_log(ruta_log, f"📊 Total de archivos: {resumen['total_archivos']}")
-    escribir_log(ruta_log, f"✅ Secciones detectadas: {resumen['total_secciones_detectadas']}")
-    escribir_log(ruta_log, f"❌ Secciones faltantes: {resumen['total_secciones_faltantes']}")
-    escribir_log(ruta_log, f"📄 JSON generado: {json_path}")
-    escribir_log(ruta_log, "="*80)
-    
-    # Estadísticas por sección
-    escribir_log(ruta_log, "\nESTADÍSTICAS POR SECCIÓN:")
-    escribir_log(ruta_log, "-"*80)
-    for seccion, stats in resumen['estadisticas_por_seccion'].items():
-        detectadas = stats['detectadas']
-        faltantes = stats['faltantes']
-        total = detectadas + faltantes
-        porcentaje = (detectadas / total * 100) if total > 0 else 0
-        escribir_log(ruta_log, f"  {seccion:<60} {detectadas}/{total} ({porcentaje:.1f}%)")
-    
-    # Log GUI final
-    if log_gui_callback:
-        log_gui_callback("", "info")
-        log_gui_callback("="*50, "info")
-        log_gui_callback("✅ DIAGNÓSTICO COMPLETADO", "success")
-        log_gui_callback("="*50, "info")
-        log_gui_callback(f"⏱️ Tiempo total: {duracion_formateada}", "info")
-        log_gui_callback(f"📊 Archivos procesados: {resumen['total_archivos']}", "info")
-        log_gui_callback(f"✅ Secciones detectadas: {resumen['total_secciones_detectadas']}", "success")
-        log_gui_callback(f"❌ Secciones faltantes: {resumen['total_secciones_faltantes']}", "warning" if resumen['total_secciones_faltantes'] > 0 else "info")
-    
-    # Actualizar progreso final
-    if progress_callback:
-        progress_callback(total_archivos, total_archivos, "Diagnóstico completado", 100)
-    
-    # --- 10. Retornar resultado ---
-    return {
-        'exitoso': True,
-        'mensaje': f'Diagnóstico completado: {resumen["total_secciones_detectadas"]} secciones detectadas',
-        'total_archivos': resumen['total_archivos'],
-        'secciones_detectadas': resumen['total_secciones_detectadas'],
-        'secciones_faltantes': resumen['total_secciones_faltantes'],
-        'json_generado': json_path,
-        'duracion': duracion_formateada,
-        'ruta_log': ruta_log
-    }
+    except Exception as e:
+        escribir_log(ruta_log, f"Error crítico en procesamiento: {str(e)}")
+        if log_gui_callback:
+            log_gui_callback(f"❌ Error crítico: {str(e)}", "error")
+        
+        return {
+            'exitoso': False,
+            'mensaje': f'Error crítico: {str(e)}',
+            'secciones_extraidas': 0,
+            'secciones_omitidas': 0,
+            'errores': 0,
+            'ruta_salida': '',
+            'ruta_log': ruta_log,
+            'duracion': '0s'
+        }

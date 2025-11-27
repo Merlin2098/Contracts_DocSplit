@@ -6,7 +6,7 @@ from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QFont
 from gui.widgets.file_selector import FileSelector
 from gui.widgets.log_viewer import LogViewer
-from controllers.contratos_controller import normalizar_contratos, diagnosticar_contratos
+from controllers.contratos_controller import normalizar_contratos, diagnosticar_contratos, procesar_contratos
 
 
 class NormalizeThread(QThread):
@@ -63,12 +63,40 @@ class DiagnosticThread(QThread):
         self.process_finished.emit(resultado)
 
 
+class ProcessThread(QThread):
+    """Thread para ejecutar el procesamiento sin bloquear la UI."""
+    
+    progress_updated = pyqtSignal(int, int, str, int)  # current, total, message, percentage
+    log_message = pyqtSignal(str, str)  # mensaje, tipo
+    process_finished = pyqtSignal(dict)  # resultado
+    
+    def __init__(self, carpeta_entrada):
+        super().__init__()
+        self.carpeta_entrada = carpeta_entrada
+    
+    def run(self):
+        """Ejecuta el procesamiento en segundo plano."""
+        def progress_callback(current, total, message, percentage):
+            self.progress_updated.emit(current, total, message, percentage)
+        
+        def log_gui_callback(mensaje, tipo):
+            self.log_message.emit(mensaje, tipo)
+        
+        resultado = procesar_contratos(
+            self.carpeta_entrada,
+            progress_callback,
+            log_gui_callback
+        )
+        self.process_finished.emit(resultado)
+
+
 class TabContratos(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.main_window = parent
         self.normalize_thread = None
         self.diagnostic_thread = None
+        self.process_thread = None
         self._setup_ui()
 
         if self.main_window:
@@ -120,12 +148,12 @@ class TabContratos(QWidget):
         )
         button_layout.addWidget(self.normalize_button)
 
-        # Botón 2: Diagnosticar (AHORA SIEMPRE HABILITADO)
+        # Botón 2: Diagnosticar (SIEMPRE HABILITADO)
         self.diagnose_button = QPushButton("② Diagnosticar")
         self.diagnose_button.setFixedSize(180, 50)
         self.diagnose_button.setFont(QFont("Segoe UI", 11, QFont.Bold))
         self.diagnose_button.setCursor(Qt.PointingHandCursor)
-        self.diagnose_button.setEnabled(True)  # ✅ HABILITADO POR DEFECTO
+        self.diagnose_button.setEnabled(True)
         self.diagnose_button.clicked.connect(self._on_diagnose_clicked)
         self.diagnose_button.setToolTip(
             "Paso 2: Detecta las 12 secciones\n"
@@ -138,7 +166,7 @@ class TabContratos(QWidget):
         self.process_button.setFixedSize(180, 50)
         self.process_button.setFont(QFont("Segoe UI", 11, QFont.Bold))
         self.process_button.setCursor(Qt.PointingHandCursor)
-        self.process_button.setEnabled(False)  # Habilitado después de diagnosticar
+        self.process_button.setEnabled(False)
         self.process_button.clicked.connect(self._on_process_clicked)
         self.process_button.setToolTip(
             "Paso 3: Extrae las secciones\n"
@@ -151,7 +179,7 @@ class TabContratos(QWidget):
 
         # --- BARRA DE PROGRESO INTEGRADA ---
         self.progress_container = QWidget()
-        self.progress_container.setVisible(False)  # Oculta por defecto
+        self.progress_container.setVisible(False)
         progress_layout = QVBoxLayout(self.progress_container)
         progress_layout.setContentsMargins(0, 10, 0, 10)
         progress_layout.setSpacing(8)
@@ -306,7 +334,37 @@ class TabContratos(QWidget):
     def _on_process_clicked(self):
         """Handler del botón Procesar (Paso 3)."""
         self._play_button_sound()
-        self.log_viewer.add_log("⏳ Paso 3: Procesamiento pendiente de implementación (Fase 5)", "warning")
+        
+        folder_path = self._validate_folder()
+        if not folder_path:
+            return
+        
+        # Limpiar log anterior
+        if hasattr(self.log_viewer, 'clear_logs'):
+            self.log_viewer.clear_logs()
+        
+        self.log_viewer.add_log("📦 Paso 3: Procesando y extrayendo secciones...", "info")
+        self.log_viewer.add_log("", "info")
+        
+        # Deshabilitar botones durante procesamiento
+        self.normalize_button.setEnabled(False)
+        self.diagnose_button.setEnabled(False)
+        self.process_button.setEnabled(False)
+        
+        # Mostrar y resetear barra de progreso
+        self.progress_container.setVisible(True)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setMaximum(100)
+        self.progress_label.setText("⏳ Preparando procesamiento...")
+        
+        # Crear thread de procesamiento
+        self.process_thread = ProcessThread(folder_path)
+        self.process_thread.progress_updated.connect(self._on_progress_updated)
+        self.process_thread.log_message.connect(self._on_log_message)
+        self.process_thread.process_finished.connect(self._on_process_finished)
+        
+        # Iniciar procesamiento
+        self.process_thread.start()
     
     def _on_progress_updated(self, current, total, message, percentage):
         """Actualiza la barra de progreso integrada."""
@@ -322,7 +380,7 @@ class TabContratos(QWidget):
         """Maneja la finalización de la normalización."""
         # Habilitar botones
         self.normalize_button.setEnabled(True)
-        self.diagnose_button.setEnabled(True)  # Siempre habilitado
+        self.diagnose_button.setEnabled(True)
         
         # Ocultar barra de progreso
         self.progress_container.setVisible(False)
@@ -373,3 +431,31 @@ class TabContratos(QWidget):
         
         # Limpiar thread
         self.diagnostic_thread = None
+    
+    def _on_process_finished(self, resultado):
+        """Maneja la finalización del procesamiento."""
+        # Habilitar botones
+        self.normalize_button.setEnabled(True)
+        self.diagnose_button.setEnabled(True)
+        self.process_button.setEnabled(True)
+        
+        # Ocultar barra de progreso
+        self.progress_container.setVisible(False)
+        
+        # Mostrar resultados adicionales en el log
+        if resultado['exitoso']:
+            self.log_viewer.add_log("", "info")
+            self.log_viewer.add_log(f"📂 Carpeta de salida: {resultado['ruta_salida']}", "info")
+            self.log_viewer.add_log(f"📝 Log generado: {resultado['ruta_log']}", "info")
+            
+            # Actualizar footer
+            if self.main_window:
+                self.main_window.update_footer(
+                    f"Contratos: {resultado['secciones_extraidas']} secciones extraídas en {resultado['duracion']}"
+                )
+        else:
+            self.log_viewer.add_log("", "info")
+            self.log_viewer.add_log(f"❌ ERROR: {resultado.get('mensaje', 'Error desconocido')}", "error")
+        
+        # Limpiar thread
+        self.process_thread = None
