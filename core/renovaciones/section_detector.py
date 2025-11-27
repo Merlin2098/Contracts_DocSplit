@@ -6,10 +6,11 @@ Detecta 3 secciones:
   3. Auditoria (Informe de auditoría final)
 
 Autor: Sistema de Procesamiento de Documentos
-Versión: 1.1 - Actualizado con patrones reales
+Versión: 1.3 - Corrección: RENOVACIÓN toma fecha tal cual (sin restar días)
 """
 
 import re
+from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Callable
 
 
@@ -20,7 +21,7 @@ class SectionDetector:
     """
     
     # Patrones de detección actualizados
-    PATRON_CONTRATO = r"PR[OÓ]RROGA\s+DE\s+CONTRATO"
+    PATRON_CONTRATO = r"(PR[OÓ]RROGA|RENOVACI[OÓ]N)\s+DE\s+CONTRATO"
     PATRON_GUIA_PELIGROS = r"PELIGROS\s+RIESGOS\s+EVENTO"
     PATRON_AUDITORIA = r"Informe\s+de\s+auditor[ií]a\s+final"
     
@@ -28,8 +29,13 @@ class SectionDetector:
     PATRON_FIRMA_CONTRATO = r"En\s+señal\s+de\s+conformidad.*suscriben"
     PATRON_TITULO_GUIA = r"Gu[ií]a\s+de\s+tipos\s+de\s+peligros"
     
-    # Patrón de fecha narrativa: "31 de Octubre del 2025"
-    PATRON_FECHA_NARRATIVA = r"(\d{1,2})\s+de\s+(\w+)\s+del\s+(\d{4})"
+    # Patrones de fecha para PRÓRROGA (Cláusula Primera - fecha de finalización del contrato anterior)
+    # Ejemplo: "prorrogado sucesivamente hasta el 31 de Octubre del 2025"
+    PATRON_FECHA_FINALIZACION_PRORROGA = r"hasta\s+el\s+(\d{1,2})\s+de\s+(\w+)\s+del\s+(\d{4})"
+    
+    # Patrón de fecha para RENOVACIÓN (Cláusula Sexta - fecha de inicio del nuevo contrato)
+    # Ejemplo: "a partir del 02 del Noviembre del 2025"
+    PATRON_FECHA_INICIO_RENOVACION = r"a\s+partir\s+del\s+(\d{1,2})\s+del?\s+(\w+)\s+del\s+(\d{4})"
     
     # Mapa de meses en español
     MESES = {
@@ -78,12 +84,17 @@ class SectionDetector:
         guia_peligros = self._detectar_guia_peligros(texto_paginas, log_callback)
         auditoria = self._detectar_auditoria(texto_paginas, log_callback)
         
+        # VALIDACIÓN DE RANGOS: Evitar solapamientos
+        contrato, guia_peligros, auditoria = self._validar_rangos_secciones(
+            contrato, guia_peligros, auditoria, log_callback
+        )
+        
         # Construir resultado
         resultado = {
             "total_paginas": total_paginas,
             "secciones": [
                 {
-                    "tipo_seccion": "Contrato",
+                    "tipo_seccion": "Renovación de contrato de trabajo",
                     "pagina_inicio": contrato["inicio"],
                     "pagina_fin": contrato["fin"],
                     "metadata": {
@@ -99,11 +110,11 @@ class SectionDetector:
                     }
                 },
                 {
-                    "tipo_seccion": "Auditoria",
+                    "tipo_seccion": "Renovación auditoria",
                     "pagina_inicio": auditoria["inicio"],
                     "pagina_fin": auditoria["fin"],
                     "metadata": {
-                        "fecha_contrato": auditoria["fecha"]
+                        "fecha_contrato": None  # Ya no se usa fecha de auditoría
                     }
                 }
             ]
@@ -111,55 +122,165 @@ class SectionDetector:
         
         return resultado
     
+    def _validar_rangos_secciones(
+        self,
+        contrato: Dict,
+        guia_peligros: Dict,
+        auditoria: Dict,
+        log_callback: Optional[Callable] = None
+    ) -> tuple:
+        """
+        Valida que no haya solapamientos entre secciones.
+        Prioridad: Contrato > Guía de Peligros > Auditoría
+        
+        Args:
+            contrato: Dict con inicio, fin, fecha
+            guia_peligros: Dict con inicio, fin, fecha
+            auditoria: Dict con inicio, fin, fecha
+            log_callback: Función opcional para registrar mensajes
+        
+        Returns:
+            tuple: (contrato, guia_peligros, auditoria) con rangos ajustados
+        """
+        ajustes_realizados = []
+        
+        # VALIDACIÓN 1: Guía de Peligros vs Contrato
+        if (contrato["inicio"] is not None and contrato["fin"] is not None and
+            guia_peligros["inicio"] is not None):
+            
+            # Si Guía empieza antes o igual que donde termina Contrato → ajustar
+            if guia_peligros["inicio"] <= contrato["fin"]:
+                nuevo_inicio = contrato["fin"] + 1
+                ajustes_realizados.append(
+                    f"Guía de Peligros: inicio ajustado de página {guia_peligros['inicio'] + 1} "
+                    f"a página {nuevo_inicio + 1} (evitar solapamiento con Contrato)"
+                )
+                guia_peligros["inicio"] = nuevo_inicio
+        
+        # VALIDACIÓN 2: Auditoría vs Guía de Peligros
+        if (guia_peligros["inicio"] is not None and guia_peligros["fin"] is not None and
+            auditoria["inicio"] is not None):
+            
+            # Si Auditoría empieza antes o igual que donde termina Guía → ajustar
+            if auditoria["inicio"] <= guia_peligros["fin"]:
+                nuevo_inicio = guia_peligros["fin"] + 1
+                ajustes_realizados.append(
+                    f"Auditoría: inicio ajustado de página {auditoria['inicio'] + 1} "
+                    f"a página {nuevo_inicio + 1} (evitar solapamiento con Guía de Peligros)"
+                )
+                auditoria["inicio"] = nuevo_inicio
+        
+        # VALIDACIÓN 3: Auditoría vs Contrato (si no hay Guía de Peligros)
+        if (contrato["inicio"] is not None and contrato["fin"] is not None and
+            auditoria["inicio"] is not None and
+            guia_peligros["inicio"] is None):
+            
+            # Si Auditoría empieza antes o igual que donde termina Contrato → ajustar
+            if auditoria["inicio"] <= contrato["fin"]:
+                nuevo_inicio = contrato["fin"] + 1
+                ajustes_realizados.append(
+                    f"Auditoría: inicio ajustado de página {auditoria['inicio'] + 1} "
+                    f"a página {nuevo_inicio + 1} (evitar solapamiento con Contrato)"
+                )
+                auditoria["inicio"] = nuevo_inicio
+        
+        # Registrar ajustes en el log
+        if ajustes_realizados and log_callback:
+            log_callback("⚠️ VALIDACIÓN DE RANGOS:")
+            for ajuste in ajustes_realizados:
+                log_callback(f"  • {ajuste}")
+        
+        return contrato, guia_peligros, auditoria
+    
     def _detectar_contrato(
         self,
         texto_paginas: List[str],
         log_callback: Optional[Callable] = None
     ) -> Dict:
         """
-        Detecta la sección de Contrato (Prórroga de Contrato).
-        Usa sistema híbrido para detectar el fin del contrato.
+        Detecta la sección de Contrato (Prórroga o Renovación).
+        Incluye detección de tipo de documento y extracción de fecha.
         
         Returns:
             Dict: {"inicio": int o None, "fin": int o None, "fecha": str o None}
         """
         patron_contrato = re.compile(self.PATRON_CONTRATO, re.IGNORECASE)
-        patron_fecha = re.compile(self.PATRON_FECHA_NARRATIVA, re.IGNORECASE)
         
         pagina_inicio = None
+        tipo_documento = None
         fecha_contrato = None
         
-        # Buscar primera coincidencia
+        # Buscar página de inicio
         for idx, texto in enumerate(texto_paginas):
             if patron_contrato.search(texto):
                 pagina_inicio = idx
                 
-                # Buscar fecha narrativa en las primeras 3 páginas
-                for i in range(idx, min(idx + 3, len(texto_paginas))):
-                    match_fecha = patron_fecha.search(texto_paginas[i])
-                    if match_fecha:
-                        dia = match_fecha.group(1).zfill(2)
-                        mes_texto = match_fecha.group(2).lower()
-                        anio = match_fecha.group(3)
-                        
-                        # Convertir mes a número
-                        mes = self.MESES.get(mes_texto)
-                        if mes:
-                            fecha_contrato = f"{mes}.{anio}"
-                            break
-                
                 if log_callback:
                     log_callback(f"✓ Contrato detectado en página {idx + 1}")
-                    if fecha_contrato:
-                        log_callback(f"  Fecha: {fecha_contrato}")
                 
                 break
         
-        # Si se detectó inicio, buscar fin con sistema híbrido
+        # Si se detectó el contrato, extraer tipo y fecha
+        if pagina_inicio is not None:
+            # Obtener texto de la primera página para determinar tipo
+            texto_primeraP = texto_paginas[pagina_inicio]
+            
+            # Determinar tipo de documento
+            if re.search(r"PR[OÓ]RROGA", texto_primeraP, re.IGNORECASE):
+                tipo_documento = 'PRORROGA'
+                if log_callback:
+                    log_callback(f"  Tipo detectado: PRÓRROGA")
+            elif re.search(r"RENOVACI[OÓ]N", texto_primeraP, re.IGNORECASE):
+                tipo_documento = 'RENOVACION'
+                if log_callback:
+                    log_callback(f"  Tipo detectado: RENOVACIÓN")
+            
+            # Extraer fecha según el tipo de documento
+            if tipo_documento:
+                # Buscar fecha en las primeras 3 páginas desde el inicio
+                for offset in range(min(3, len(texto_paginas) - pagina_inicio)):
+                    idx = pagina_inicio + offset
+                    texto = texto_paginas[idx]
+                    
+                    if tipo_documento == 'PRORROGA':
+                        patron_fecha = re.compile(self.PATRON_FECHA_FINALIZACION_PRORROGA, re.IGNORECASE)
+                        sumar_dias = 1  # PRÓRROGA: sumar 1 día
+                    else:  # RENOVACION
+                        patron_fecha = re.compile(self.PATRON_FECHA_INICIO_RENOVACION, re.IGNORECASE)
+                        sumar_dias = 0  # RENOVACIÓN: tomar fecha tal cual
+                    
+                    match = patron_fecha.search(texto)
+                    
+                    if match:
+                        dia = int(match.group(1))
+                        mes_texto = match.group(2).lower()
+                        anio = int(match.group(3))
+                        
+                        # Convertir mes a número
+                        mes_num = self.MESES.get(mes_texto)
+                        if mes_num:
+                            try:
+                                # Crear fecha
+                                fecha_obj = datetime(anio, int(mes_num), dia)
+                                
+                                # Aplicar ajuste solo si es PRÓRROGA
+                                if sumar_dias > 0:
+                                    fecha_obj += timedelta(days=sumar_dias)
+                                
+                                fecha_contrato = f"{fecha_obj.strftime('%m')}.{fecha_obj.year}"
+                                
+                                if log_callback:
+                                    log_callback(f"  Fecha extraída: {fecha_contrato} (página {idx + 1})")
+                                
+                                break
+                            except ValueError:
+                                continue
+        
+        # Detectar página final
         pagina_fin = None
         if pagina_inicio is not None:
-            # OPCIÓN A: Buscar bloque de firma (más confiable)
-            patron_firma = re.compile(self.PATRON_FIRMA_CONTRATO, re.IGNORECASE | re.DOTALL)
+            # OPCIÓN A: Buscar firma de contrato
+            patron_firma = re.compile(self.PATRON_FIRMA_CONTRATO, re.IGNORECASE)
             
             for idx in range(pagina_inicio + 1, len(texto_paginas)):
                 if patron_firma.search(texto_paginas[idx]):
@@ -219,35 +340,51 @@ class SectionDetector:
     ) -> Dict:
         """
         Detecta la sección de Guía de Peligros.
-        Usa detección dual: título o tabla de peligros.
+        Usa detección dual: primero tabla de peligros, luego título como fallback.
+        
+        IMPORTANTE: Prioriza la TABLA sobre el TÍTULO para evitar detecciones prematuras
+        cuando el título aparece al final de la sección de Contrato.
         
         Returns:
             Dict: {"inicio": int o None, "fin": int o None, "fecha": str o None}
         """
         pagina_inicio = None
         
-        # OPCIÓN A: Buscar por título de Guía (más preciso)
-        patron_titulo_guia = re.compile(self.PATRON_TITULO_GUIA, re.IGNORECASE)
+        # OPCIÓN A (PRIORITARIA): Buscar por tabla de peligros
+        patron_tabla = re.compile(self.PATRON_GUIA_PELIGROS, re.IGNORECASE)
         
         for idx, texto in enumerate(texto_paginas):
-            if patron_titulo_guia.search(texto):
+            if patron_tabla.search(texto):
                 pagina_inicio = idx
                 
                 if log_callback:
-                    log_callback(f"✓ Guía de Peligros detectada en página {idx + 1} (por título)")
+                    log_callback(f"✓ Guía de Peligros detectada en página {idx + 1} (por tabla)")
                 
                 break
         
-        # OPCIÓN B: Si no encuentra título, buscar por tabla de peligros
+        # OPCIÓN B (FALLBACK): Si no encuentra tabla, buscar por título de Guía
         if pagina_inicio is None:
-            patron_tabla = re.compile(self.PATRON_GUIA_PELIGROS, re.IGNORECASE)
+            patron_titulo_guia = re.compile(self.PATRON_TITULO_GUIA, re.IGNORECASE)
             
             for idx, texto in enumerate(texto_paginas):
-                if patron_tabla.search(texto):
+                if patron_titulo_guia.search(texto):
+                    # VALIDACIÓN: Asegurarse que no es una mención prematura
+                    # Solo aceptar si NO hay tabla en páginas posteriores cercanas
+                    hay_tabla_posterior = False
+                    
+                    for j in range(idx + 1, min(idx + 3, len(texto_paginas))):
+                        if patron_tabla.search(texto_paginas[j]):
+                            hay_tabla_posterior = True
+                            break
+                    
+                    # Si hay tabla posterior, esperar a detectarla
+                    if hay_tabla_posterior:
+                        continue
+                    
                     pagina_inicio = idx
                     
                     if log_callback:
-                        log_callback(f"✓ Guía de Peligros detectada en página {idx + 1} (por tabla)")
+                        log_callback(f"✓ Guía de Peligros detectada en página {idx + 1} (por título)")
                     
                     break
         
@@ -284,29 +421,16 @@ class SectionDetector:
             Dict: {"inicio": int o None, "fin": int o None, "fecha": str o None}
         """
         patron_auditoria = re.compile(self.PATRON_AUDITORIA, re.IGNORECASE)
-        # Fecha en formato YYYY-MM-DD (ej: 2025-10-31)
-        patron_fecha_iso = re.compile(r"20\d{2}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])")
         
         pagina_inicio = None
-        fecha_contrato = None
         
         # Buscar primera coincidencia
         for idx, texto in enumerate(texto_paginas):
             if patron_auditoria.search(texto):
                 pagina_inicio = idx
                 
-                # Buscar fecha ISO en la misma página
-                match_fecha = patron_fecha_iso.search(texto)
-                if match_fecha:
-                    # Convertir YYYY-MM-DD a MM.YYYY
-                    fecha_iso = match_fecha.group(0)
-                    partes = fecha_iso.split('-')
-                    fecha_contrato = f"{partes[1]}.{partes[0]}"
-                
                 if log_callback:
                     log_callback(f"✓ Auditoría detectada en página {idx + 1}")
-                    if fecha_contrato:
-                        log_callback(f"  Fecha: {fecha_contrato}")
                 
                 break
         
@@ -318,30 +442,48 @@ class SectionDetector:
         return {
             "inicio": pagina_inicio,
             "fin": pagina_fin,
-            "fecha": fecha_contrato
+            "fecha": None  # Ya no se extrae fecha de auditoría
         }
     
-    def extraer_fecha_contrato(self, texto: str) -> Optional[str]:
+    def extraer_fecha_contrato(self, texto: str, tipo_documento: str = 'PRORROGA') -> Optional[str]:
         """
-        Extrae la fecha del contrato en formato narrativo y la convierte a MM.YYYY.
+        Extrae la fecha del contrato y la convierte a MM.YYYY.
+        DEPRECATED: Usar _detectar_contrato() que ya incluye la lógica completa.
         
         Args:
             texto: Texto donde buscar la fecha
+            tipo_documento: 'PRORROGA' o 'RENOVACION'
         
         Returns:
             Fecha en formato MM.YYYY o None si no se encuentra
         """
-        patron_fecha = re.compile(self.PATRON_FECHA_NARRATIVA, re.IGNORECASE)
+        if tipo_documento == 'PRORROGA':
+            patron_fecha = re.compile(self.PATRON_FECHA_FINALIZACION_PRORROGA, re.IGNORECASE)
+            sumar_dias = 1
+        else:  # RENOVACION
+            patron_fecha = re.compile(self.PATRON_FECHA_INICIO_RENOVACION, re.IGNORECASE)
+            sumar_dias = 0  # RENOVACIÓN: tomar fecha tal cual
+        
         match = patron_fecha.search(texto)
         
         if match:
-            dia = match.group(1).zfill(2)
+            dia = int(match.group(1))
             mes_texto = match.group(2).lower()
-            anio = match.group(3)
+            anio = int(match.group(3))
             
             # Convertir mes a número
-            mes = self.MESES.get(mes_texto)
-            if mes:
-                return f"{mes}.{anio}"
+            mes_num = self.MESES.get(mes_texto)
+            if mes_num:
+                try:
+                    # Crear fecha
+                    fecha_obj = datetime(anio, int(mes_num), dia)
+                    
+                    # Aplicar ajuste solo si es PRÓRROGA
+                    if sumar_dias > 0:
+                        fecha_obj += timedelta(days=sumar_dias)
+                    
+                    return f"{fecha_obj.strftime('%m')}.{fecha_obj.year}"
+                except ValueError:
+                    return None
         
         return None

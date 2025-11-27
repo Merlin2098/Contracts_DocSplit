@@ -13,6 +13,7 @@ Detecta 12 secciones usando:
 import os
 import re
 import fitz  # PyMuPDF
+from datetime import datetime, timedelta
 
 
 class SectionDetector:
@@ -717,8 +718,9 @@ class SectionDetector:
     
     def _extraer_fecha_contrato(self, fin_contrato):
         """
-        Extrae la fecha del contrato desde la última página del bloque Contrato.
-        Patrón: "el DD de MES del YYYY"
+        Extrae la fecha del contrato buscando en todas las páginas del bloque Contrato.
+        Busca el patrón: "regirá a partir del DD de MES del YYYY"
+        Retorna la fecha tal como está (sin restar 1 día).
         Retorna: "MM.YYYY"
         
         Args:
@@ -730,8 +732,6 @@ class SectionDetector:
         if fin_contrato is None or fin_contrato >= self.total_paginas:
             return None
         
-        texto_ultima_pagina = self.texto_paginas[fin_contrato]
-        
         # Mapeo de meses
         meses = {
             'enero': '01', 'febrero': '02', 'marzo': '03', 'abril': '04',
@@ -739,16 +739,27 @@ class SectionDetector:
             'septiembre': '09', 'octubre': '10', 'noviembre': '11', 'diciembre': '12'
         }
         
-        # Patrón: el DD de MES del YYYY
-        patron = r'el\s+\d+\s+de\s+(\w+)\s+del?\s+(\d{4})'
-        match = re.search(patron, texto_ultima_pagina, re.IGNORECASE)
+        # Patrón específico: "regirá a partir del DD de MES del YYYY"
+        patron = r'regirá\s+a\s+partir\s+del\s+(\d{1,2})\s+de\s+(\w+)\s+del?\s+(\d{4})'
         
-        if match:
-            mes_texto = match.group(1).lower()
-            anio = match.group(2)
-            mes_num = meses.get(mes_texto)
+        # Buscar en TODAS las páginas del bloque Contrato (desde inicio hasta fin)
+        for idx in range(0, fin_contrato + 1):
+            texto_pagina = self.texto_paginas[idx]
+            match = re.search(patron, texto_pagina, re.IGNORECASE)
             
-            if mes_num:
-                return f"{mes_num}.{anio}"
+            if match:
+                dia = int(match.group(1))
+                mes_texto = match.group(2).lower()
+                anio = int(match.group(3))
+                mes_num = meses.get(mes_texto)
+                
+                if mes_num:
+                    try:
+                        # Validar que la fecha sea válida
+                        fecha_obj = datetime(anio, int(mes_num), dia)
+                        return f"{fecha_obj.strftime('%m')}.{fecha_obj.year}"
+                    except ValueError:
+                        # Si la fecha es inválida, continuar buscando
+                        continue
         
         return None

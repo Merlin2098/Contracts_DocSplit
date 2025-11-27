@@ -8,7 +8,7 @@ from pathlib import Path
 # ==========================================================
 # CONFIGURACIÓN
 # ==========================================================
-NOMBRE_EXE = "GestionPDFs.exe"
+NOMBRE_EXE = "DivisionContratos_Internos.exe"
 MAIN_SCRIPT = "main.py"
 
 DIST_PATH = "dist"

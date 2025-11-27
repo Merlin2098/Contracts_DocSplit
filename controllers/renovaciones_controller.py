@@ -354,7 +354,7 @@ def diagnosticar_renovaciones(
             # Extraer fecha del contrato
             fecha_contrato = None
             for seccion in resultado_deteccion["secciones"]:
-                if seccion["tipo_seccion"] in ["Contrato", "Auditoria"]:
+                if seccion["tipo_seccion"] in ["Renovación de contrato de trabajo", "Renovación auditoria"]:
                     fecha_contrato = seccion["metadata"].get("fecha_contrato")
                     if fecha_contrato:
                         break
