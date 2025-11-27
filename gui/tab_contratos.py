@@ -137,7 +137,7 @@ class TabContratos(QWidget):
         button_layout.addStretch()
 
         # Botón 1: Normalizar
-        self.normalize_button = QPushButton("① Normalizar")
+        self.normalize_button = QPushButton("Normalizar")
         self.normalize_button.setFixedSize(180, 50)
         self.normalize_button.setFont(QFont("Segoe UI", 11, QFont.Bold))
         self.normalize_button.setCursor(Qt.PointingHandCursor)
@@ -149,7 +149,7 @@ class TabContratos(QWidget):
         button_layout.addWidget(self.normalize_button)
 
         # Botón 2: Diagnosticar (SIEMPRE HABILITADO)
-        self.diagnose_button = QPushButton("② Diagnosticar")
+        self.diagnose_button = QPushButton("Diagnosticar")
         self.diagnose_button.setFixedSize(180, 50)
         self.diagnose_button.setFont(QFont("Segoe UI", 11, QFont.Bold))
         self.diagnose_button.setCursor(Qt.PointingHandCursor)
@@ -162,7 +162,7 @@ class TabContratos(QWidget):
         button_layout.addWidget(self.diagnose_button)
 
         # Botón 3: Procesar (deshabilitado hasta completar diagnóstico)
-        self.process_button = QPushButton("③ Procesar")
+        self.process_button = QPushButton("Procesar")
         self.process_button.setFixedSize(180, 50)
         self.process_button.setFont(QFont("Segoe UI", 11, QFont.Bold))
         self.process_button.setCursor(Qt.PointingHandCursor)

@@ -115,7 +115,7 @@ class TabRenovaciones(QWidget):
         button_layout.addStretch()
 
         # Botón Diagnosticar
-        self.diagnostic_button = QPushButton("🔍 Diagnosticar")
+        self.diagnostic_button = QPushButton("Diagnosticar")
         self.diagnostic_button.setFixedSize(200, 50)
         self.diagnostic_button.setFont(QFont("Segoe UI", 11, QFont.Bold))
         self.diagnostic_button.setCursor(Qt.PointingHandCursor)
@@ -124,7 +124,7 @@ class TabRenovaciones(QWidget):
         button_layout.addWidget(self.diagnostic_button)
 
         # Botón Procesar
-        self.process_button = QPushButton("✅ Procesar")
+        self.process_button = QPushButton("Procesar")
         self.process_button.setFixedSize(200, 50)
         self.process_button.setFont(QFont("Segoe UI", 11, QFont.Bold))
         self.process_button.setCursor(Qt.PointingHandCursor)
