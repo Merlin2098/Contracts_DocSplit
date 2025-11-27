@@ -1,0 +1,35 @@
+{
+  "name": "dark",
+  "description": "Tema oscuro con fondo azul nocturno profundo",
+  "colors": {
+    "background": "#0D0F22",
+    "surface": "#1B2233",
+    "border": "#2C3549",
+    "text": {
+      "primary": "#E2E8F0",
+      "secondary": "#94A3B8",
+      "muted": "#64748B"
+    },
+    "primary": "#38BDF8",
+    "accent": "#E879F9",
+    "success": "#22C55E",
+    "warning": "#FBBF24",
+    "error": "#F43F5E"
+  },
+  "components": {
+    "button": {
+      "background": "##38BDF8",
+      "text": "#FFFFFF",
+      "hover": "#0EA5E9"
+    },
+    "card": {
+      "background": "#1B2233",
+      "shadow": "rgba(0, 0, 0, 0.4)"
+    },
+    "input": {
+      "background": "#1E293B",
+      "border": "#334155",
+      "text": "#E2E8F0"
+    }
+  }
+}

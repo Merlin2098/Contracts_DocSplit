@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+*.egg-info/
+dist/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+
+
+# Logs
+logs/**/*.log
+logs/**/*.txt
+
+# Build
+build/
+dist/
+*.spec
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Script generador (opcional, descomentar si no quieres subirlo a Git)
+# build.py

@@ -1,0 +1,14 @@
+PyQt5
+PyPDF2
+pymupdf
+reportlab
+pytest
+pytest-qt
+pyinstaller
+pandas
+openpyxl
+setuptools
+wheel
+packaging
+Pillow
+tqdm
