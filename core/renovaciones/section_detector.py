@@ -3,10 +3,10 @@ Detector de secciones para PDFs de Renovaciones.
 Detecta 3 secciones:
   1. Contrato (Prórroga de Contrato)
   2. Guia de Peligros (tabla de peligros y riesgos)
-  3. Auditoria (Informe de auditoría final)
+  3. Auditoria (Informe de auditoría final / Final Audit Report)
 
 Autor: Sistema de Procesamiento de Documentos
-Versión: 1.3 - Corrección: RENOVACIÓN toma fecha tal cual (sin restar días)
+Versión: 1.4 - Soporte bilingüe: Auditoría en español e inglés
 """
 
 import re
@@ -23,7 +23,7 @@ class SectionDetector:
     # Patrones de detección actualizados
     PATRON_CONTRATO = r"(PR[OÓ]RROGA|RENOVACI[OÓ]N)\s+DE\s+CONTRATO"
     PATRON_GUIA_PELIGROS = r"PELIGROS\s+RIESGOS\s+EVENTO"
-    PATRON_AUDITORIA = r"Informe\s+de\s+auditor[ií]a\s+final"
+    PATRON_AUDITORIA = r"(Informe\s+de\s+auditor[ií]a\s+final|Final\s+Audit\s+Report)"
     
     # Patrones adicionales para delimitar fin de contrato
     PATRON_FIRMA_CONTRATO = r"En\s+señal\s+de\s+conformidad.*suscriben"
