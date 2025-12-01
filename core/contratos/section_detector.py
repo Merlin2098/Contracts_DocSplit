@@ -135,7 +135,8 @@ class SectionDetector:
         "auditoria": [
             "INFORME DE AUDITORÍA FINAL",
             "INFORME DE AUDITORIA FINAL",
-            "Auditoría Final"
+            "Auditoría Final",
+            "Final Audit Report"
         ]
     }
     

@@ -6,7 +6,7 @@ Detecta 3 secciones:
   3. Auditoria (Informe de auditoría final / Final Audit Report)
 
 Autor: Sistema de Procesamiento de Documentos
-Versión: 1.4 - Soporte bilingüe: Auditoría en español e inglés
+Versión: 1.6 - Inicio de contrato en página 1 + patrón de fecha mejorado
 """
 
 import re
@@ -34,8 +34,8 @@ class SectionDetector:
     PATRON_FECHA_FINALIZACION_PRORROGA = r"hasta\s+el\s+(\d{1,2})\s+de\s+(\w+)\s+del\s+(\d{4})"
     
     # Patrón de fecha para RENOVACIÓN (Cláusula Sexta - fecha de inicio del nuevo contrato)
-    # Ejemplo: "a partir del 02 del Noviembre del 2025"
-    PATRON_FECHA_INICIO_RENOVACION = r"a\s+partir\s+del\s+(\d{1,2})\s+del?\s+(\w+)\s+del\s+(\d{4})"
+    # Ejemplo: "a partir del 02 de Noviembre del 2025" o "a partir del 02 del Noviembre del 2025"
+    PATRON_FECHA_INICIO_RENOVACION = r"a\s+partir\s+del\s+(\d{1,2})\s+de[l]?\s+(\w+)\s+del\s+(\d{4})"
     
     # Mapa de meses en español
     MESES = {
@@ -148,8 +148,10 @@ class SectionDetector:
         if (contrato["inicio"] is not None and contrato["fin"] is not None and
             guia_peligros["inicio"] is not None):
             
-            # Si Guía empieza antes o igual que donde termina Contrato → ajustar
-            if guia_peligros["inicio"] <= contrato["fin"]:
+            # Solo ajustar si hay verdadero solapamiento:
+            # Guía debe estar DENTRO del rango del Contrato, no solo antes de su fin
+            if (guia_peligros["inicio"] >= contrato["inicio"] and 
+                guia_peligros["inicio"] <= contrato["fin"]):
                 nuevo_inicio = contrato["fin"] + 1
                 ajustes_realizados.append(
                     f"Guía de Peligros: inicio ajustado de página {guia_peligros['inicio'] + 1} "
@@ -161,8 +163,10 @@ class SectionDetector:
         if (guia_peligros["inicio"] is not None and guia_peligros["fin"] is not None and
             auditoria["inicio"] is not None):
             
-            # Si Auditoría empieza antes o igual que donde termina Guía → ajustar
-            if auditoria["inicio"] <= guia_peligros["fin"]:
+            # Solo ajustar si hay verdadero solapamiento:
+            # Auditoría debe estar DENTRO del rango de Guía, no solo antes de su fin
+            if (auditoria["inicio"] >= guia_peligros["inicio"] and 
+                auditoria["inicio"] <= guia_peligros["fin"]):
                 nuevo_inicio = guia_peligros["fin"] + 1
                 ajustes_realizados.append(
                     f"Auditoría: inicio ajustado de página {auditoria['inicio'] + 1} "
@@ -175,8 +179,10 @@ class SectionDetector:
             auditoria["inicio"] is not None and
             guia_peligros["inicio"] is None):
             
-            # Si Auditoría empieza antes o igual que donde termina Contrato → ajustar
-            if auditoria["inicio"] <= contrato["fin"]:
+            # Solo ajustar si hay verdadero solapamiento:
+            # Auditoría debe estar DENTRO del rango de Contrato, no solo antes de su fin
+            if (auditoria["inicio"] >= contrato["inicio"] and 
+                auditoria["inicio"] <= contrato["fin"]):
                 nuevo_inicio = contrato["fin"] + 1
                 ajustes_realizados.append(
                     f"Auditoría: inicio ajustado de página {auditoria['inicio'] + 1} "
@@ -199,133 +205,128 @@ class SectionDetector:
     ) -> Dict:
         """
         Detecta la sección de Contrato (Prórroga o Renovación).
+        ASUME que el contrato SIEMPRE empieza en la página 1 (índice 0).
         Incluye detección de tipo de documento y extracción de fecha.
         
         Returns:
             Dict: {"inicio": int o None, "fin": int o None, "fecha": str o None}
         """
-        patron_contrato = re.compile(self.PATRON_CONTRATO, re.IGNORECASE)
-        
-        pagina_inicio = None
+        # INICIO: Siempre es la primera página
+        pagina_inicio = 0
         tipo_documento = None
         fecha_contrato = None
         
-        # Buscar página de inicio
-        for idx, texto in enumerate(texto_paginas):
-            if patron_contrato.search(texto):
-                pagina_inicio = idx
-                
-                if log_callback:
-                    log_callback(f"✓ Contrato detectado en página {idx + 1}")
-                
-                break
+        if log_callback:
+            log_callback(f"✓ Contrato detectado en página 1 (inicio asumido)")
         
-        # Si se detectó el contrato, extraer tipo y fecha
-        if pagina_inicio is not None:
-            # Obtener texto de la primera página para determinar tipo
-            texto_primeraP = texto_paginas[pagina_inicio]
+        # Obtener texto de la primera página para determinar tipo
+        texto_primera_pag = texto_paginas[pagina_inicio]
+        
+        # Determinar tipo de documento
+        if re.search(r"PR[OÓ]RROGA", texto_primera_pag, re.IGNORECASE):
+            tipo_documento = 'PRORROGA'
+            if log_callback:
+                log_callback(f"  Tipo detectado: PRÓRROGA")
+        elif re.search(r"RENOVACI[OÓ]N", texto_primera_pag, re.IGNORECASE):
+            tipo_documento = 'RENOVACION'
+            if log_callback:
+                log_callback(f"  Tipo detectado: RENOVACIÓN")
+        else:
+            # Si no se detecta tipo específico, asumir RENOVACION por defecto
+            tipo_documento = 'RENOVACION'
+            if log_callback:
+                log_callback(f"  Tipo por defecto: RENOVACIÓN (no se detectó PRÓRROGA)")
+        
+        # Extraer fecha según el tipo de documento
+        # Buscar fecha en las primeras 3 páginas
+        for offset in range(min(3, len(texto_paginas))):
+            idx = pagina_inicio + offset
+            texto = texto_paginas[idx]
             
-            # Determinar tipo de documento
-            if re.search(r"PR[OÓ]RROGA", texto_primeraP, re.IGNORECASE):
-                tipo_documento = 'PRORROGA'
-                if log_callback:
-                    log_callback(f"  Tipo detectado: PRÓRROGA")
-            elif re.search(r"RENOVACI[OÓ]N", texto_primeraP, re.IGNORECASE):
-                tipo_documento = 'RENOVACION'
-                if log_callback:
-                    log_callback(f"  Tipo detectado: RENOVACIÓN")
+            if tipo_documento == 'PRORROGA':
+                patron_fecha = re.compile(self.PATRON_FECHA_FINALIZACION_PRORROGA, re.IGNORECASE)
+                sumar_dias = 1  # PRÓRROGA: sumar 1 día
+            else:  # RENOVACION
+                patron_fecha = re.compile(self.PATRON_FECHA_INICIO_RENOVACION, re.IGNORECASE)
+                sumar_dias = 0  # RENOVACIÓN: tomar fecha tal cual
             
-            # Extraer fecha según el tipo de documento
-            if tipo_documento:
-                # Buscar fecha en las primeras 3 páginas desde el inicio
-                for offset in range(min(3, len(texto_paginas) - pagina_inicio)):
-                    idx = pagina_inicio + offset
-                    texto = texto_paginas[idx]
-                    
-                    if tipo_documento == 'PRORROGA':
-                        patron_fecha = re.compile(self.PATRON_FECHA_FINALIZACION_PRORROGA, re.IGNORECASE)
-                        sumar_dias = 1  # PRÓRROGA: sumar 1 día
-                    else:  # RENOVACION
-                        patron_fecha = re.compile(self.PATRON_FECHA_INICIO_RENOVACION, re.IGNORECASE)
-                        sumar_dias = 0  # RENOVACIÓN: tomar fecha tal cual
-                    
-                    match = patron_fecha.search(texto)
-                    
-                    if match:
-                        dia = int(match.group(1))
-                        mes_texto = match.group(2).lower()
-                        anio = int(match.group(3))
+            match = patron_fecha.search(texto)
+            
+            if match:
+                dia = int(match.group(1))
+                mes_texto = match.group(2).lower()
+                anio = int(match.group(3))
+                
+                # Convertir mes a número
+                mes_num = self.MESES.get(mes_texto)
+                if mes_num:
+                    try:
+                        # Crear fecha
+                        fecha_obj = datetime(anio, int(mes_num), dia)
                         
-                        # Convertir mes a número
-                        mes_num = self.MESES.get(mes_texto)
-                        if mes_num:
-                            try:
-                                # Crear fecha
-                                fecha_obj = datetime(anio, int(mes_num), dia)
-                                
-                                # Aplicar ajuste solo si es PRÓRROGA
-                                if sumar_dias > 0:
-                                    fecha_obj += timedelta(days=sumar_dias)
-                                
-                                fecha_contrato = f"{fecha_obj.strftime('%m')}.{fecha_obj.year}"
-                                
-                                if log_callback:
-                                    log_callback(f"  Fecha extraída: {fecha_contrato} (página {idx + 1})")
-                                
-                                break
-                            except ValueError:
-                                continue
+                        # Aplicar ajuste solo si es PRÓRROGA
+                        if sumar_dias > 0:
+                            fecha_obj += timedelta(days=sumar_dias)
+                        
+                        fecha_contrato = f"{fecha_obj.strftime('%m')}.{fecha_obj.year}"
+                        
+                        if log_callback:
+                            log_callback(f"  Fecha extraída: {fecha_contrato} (página {idx + 1})")
+                        
+                        break
+                    except ValueError:
+                        continue
         
         # Detectar página final
         pagina_fin = None
-        if pagina_inicio is not None:
-            # OPCIÓN A: Buscar firma de contrato
-            patron_firma = re.compile(self.PATRON_FIRMA_CONTRATO, re.IGNORECASE)
+        
+        # OPCIÓN A (PRIORITARIA): Buscar firma de contrato
+        patron_firma = re.compile(self.PATRON_FIRMA_CONTRATO, re.IGNORECASE)
+        
+        for idx in range(pagina_inicio + 1, len(texto_paginas)):
+            if patron_firma.search(texto_paginas[idx]):
+                pagina_fin = idx
+                if log_callback:
+                    log_callback(f"  Fin detectado por firma en página {idx + 1}")
+                break
+        
+        # OPCIÓN B: Si no hay firma, buscar título de Guía
+        if pagina_fin is None:
+            patron_titulo_guia = re.compile(self.PATRON_TITULO_GUIA, re.IGNORECASE)
             
             for idx in range(pagina_inicio + 1, len(texto_paginas)):
-                if patron_firma.search(texto_paginas[idx]):
-                    pagina_fin = idx
+                if patron_titulo_guia.search(texto_paginas[idx]):
+                    pagina_fin = idx - 1
                     if log_callback:
-                        log_callback(f"  Fin detectado por firma en página {idx + 1}")
+                        log_callback(f"  Fin detectado por título de Guía en página {idx + 1}")
                     break
+        
+        # OPCIÓN C: Fallback - buscar tabla de peligros
+        if pagina_fin is None:
+            patron_guia = re.compile(self.PATRON_GUIA_PELIGROS, re.IGNORECASE)
             
-            # OPCIÓN B: Si no hay firma, buscar título de Guía
-            if pagina_fin is None:
-                patron_titulo_guia = re.compile(self.PATRON_TITULO_GUIA, re.IGNORECASE)
-                
-                for idx in range(pagina_inicio + 1, len(texto_paginas)):
-                    if patron_titulo_guia.search(texto_paginas[idx]):
-                        pagina_fin = idx - 1
-                        if log_callback:
-                            log_callback(f"  Fin detectado por título de Guía en página {idx}")
-                        break
-            
-            # OPCIÓN C: Fallback - buscar tabla de peligros
-            if pagina_fin is None:
-                patron_guia = re.compile(self.PATRON_GUIA_PELIGROS, re.IGNORECASE)
-                
-                for idx in range(pagina_inicio + 1, len(texto_paginas)):
-                    if patron_guia.search(texto_paginas[idx]):
-                        pagina_fin = idx - 1
-                        if log_callback:
-                            log_callback(f"  Fin detectado por tabla de peligros en página {idx}")
-                        break
-            
-            # OPCIÓN D: Si no encuentra siguiente sección, buscar Auditoría
-            if pagina_fin is None:
-                patron_auditoria = re.compile(self.PATRON_AUDITORIA, re.IGNORECASE)
-                for idx in range(pagina_inicio + 1, len(texto_paginas)):
-                    if patron_auditoria.search(texto_paginas[idx]):
-                        pagina_fin = idx - 1
-                        if log_callback:
-                            log_callback(f"  Fin detectado por Auditoría en página {idx}")
-                        break
-            
-            # Último recurso: va hasta el final
-            if pagina_fin is None:
-                pagina_fin = len(texto_paginas) - 1
-                if log_callback:
-                    log_callback(f"  Fin por defecto: última página")
+            for idx in range(pagina_inicio + 1, len(texto_paginas)):
+                if patron_guia.search(texto_paginas[idx]):
+                    pagina_fin = idx - 1
+                    if log_callback:
+                        log_callback(f"  Fin detectado por tabla de peligros en página {idx + 1}")
+                    break
+        
+        # OPCIÓN D: Si no encuentra siguiente sección, buscar Auditoría
+        if pagina_fin is None:
+            patron_auditoria = re.compile(self.PATRON_AUDITORIA, re.IGNORECASE)
+            for idx in range(pagina_inicio + 1, len(texto_paginas)):
+                if patron_auditoria.search(texto_paginas[idx]):
+                    pagina_fin = idx - 1
+                    if log_callback:
+                        log_callback(f"  Fin detectado por Auditoría en página {idx + 1}")
+                    break
+        
+        # Último recurso: va hasta el final
+        if pagina_fin is None:
+            pagina_fin = len(texto_paginas) - 1
+            if log_callback:
+                log_callback(f"  Fin por defecto: última página")
         
         return {
             "inicio": pagina_inicio,
