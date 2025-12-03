@@ -34,13 +34,15 @@ class JSONGenerator:
                                  'Contrato de Trabajo': {'inicio': 1, 'fin': 15},
                                  ...
                              },
-                             'fecha_contrato': str or None
+                             'fecha_contrato': str or None,
+                             'fecha_origen': str ('sunat')
                          }
         """
         # Construir estructura para este archivo
         self.datos[nombre_archivo] = {
             'total_paginas': self._calcular_total_paginas(info['secciones']),
             'fecha_contrato': info.get('fecha_contrato'),
+            'fecha_origen': info.get('fecha_origen', 'sunat'),
             'secciones': info['secciones']
         }
     
@@ -90,13 +92,15 @@ class JSONGenerator:
                 'total_secciones_detectadas': int,
                 'total_secciones_faltantes': int,
                 'archivos_con_errores': list,
-                'estadisticas_por_seccion': dict
+                'estadisticas_por_seccion': dict,
+                'fechas_desde_sunat': int
             }
         """
         total_archivos = len(self.datos)
         total_secciones_detectadas = 0
         total_secciones_faltantes = 0
         archivos_con_errores = []
+        fechas_desde_sunat = 0
         
         # Estadísticas por sección (cuántas veces se detectó cada una)
         estadisticas_por_seccion = {}
@@ -106,6 +110,10 @@ class JSONGenerator:
             if 'error' in info:
                 archivos_con_errores.append(archivo)
                 continue
+            
+            # Contar si la fecha vino de SUNAT
+            if info.get('fecha_origen') == 'sunat' and info.get('fecha_contrato'):
+                fechas_desde_sunat += 1
             
             # Contar secciones
             secciones = info.get('secciones', {})
@@ -131,7 +139,8 @@ class JSONGenerator:
             'total_secciones_detectadas': total_secciones_detectadas,
             'total_secciones_faltantes': total_secciones_faltantes,
             'archivos_con_errores': archivos_con_errores,
-            'estadisticas_por_seccion': estadisticas_por_seccion
+            'estadisticas_por_seccion': estadisticas_por_seccion,
+            'fechas_desde_sunat': fechas_desde_sunat
         }
     
     def obtener_archivos_incompletos(self, umbral_minimo=10):
@@ -228,6 +237,7 @@ class JSONGenerator:
         lineas.append(f"Total de archivos procesados: {resumen['total_archivos']}")
         lineas.append(f"Secciones detectadas: {resumen['total_secciones_detectadas']}")
         lineas.append(f"Secciones faltantes: {resumen['total_secciones_faltantes']}")
+        lineas.append(f"Fechas extraídas de SUNAT: {resumen['fechas_desde_sunat']}/{resumen['total_archivos']}")
         lineas.append("")
         
         # Estadísticas por sección
@@ -246,14 +256,14 @@ class JSONGenerator:
         # Archivos con problemas
         archivos_sin_fecha = self.obtener_archivos_sin_fecha()
         if archivos_sin_fecha:
-            lineas.append("⚠️  ARCHIVOS SIN FECHA DETECTADA:")
+            lineas.append("⚠️ ARCHIVOS SIN FECHA DETECTADA:")
             for archivo in archivos_sin_fecha:
                 lineas.append(f"  - {archivo}")
             lineas.append("")
         
         archivos_incompletos = self.obtener_archivos_incompletos(10)
         if archivos_incompletos:
-            lineas.append("⚠️  ARCHIVOS INCOMPLETOS (<10 secciones):")
+            lineas.append("⚠️ ARCHIVOS INCOMPLETOS (<10 secciones):")
             for archivo, num_secciones in archivos_incompletos:
                 lineas.append(f"  - {archivo}: {num_secciones}/12 secciones")
             lineas.append("")
