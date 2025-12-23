@@ -6,12 +6,18 @@ Detecta 3 secciones:
   3. Auditoria (Informe de auditoría final / Final Audit Report)
 
 Autor: Sistema de Procesamiento de Documentos
-Versión: 1.6 - Inicio de contrato en página 1 + patrón de fecha mejorado
+Versión: 1.7 - Extracción prioritaria de fecha en Cláusula Primera (Antecedentes)
 """
 
 import re
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Callable
+from core.utils.regex_renovaciones import (
+    PatronesFecha,
+    PatronesSecciones,
+    buscar_patron_multiple,
+    extraer_fecha_normalizada
+)
 
 
 class SectionDetector:
@@ -29,12 +35,14 @@ class SectionDetector:
     PATRON_FIRMA_CONTRATO = r"En\s+señal\s+de\s+conformidad.*suscriben"
     PATRON_TITULO_GUIA = r"Gu[ií]a\s+de\s+tipos\s+de\s+peligros"
     
-    # Patrones de fecha para PRÓRROGA (Cláusula Primera - fecha de finalización del contrato anterior)
-    # Ejemplo: "prorrogado sucesivamente hasta el 31 de Octubre del 2025"
-    PATRON_FECHA_FINALIZACION_PRORROGA = r"hasta\s+el\s+(\d{1,2})\s+de\s+(\w+)\s+del\s+(\d{4})"
+    # Patrón de fecha para PRÓRROGA (Cláusula Primera - fecha de finalización del contrato anterior)
+    # Ahora acepta tanto "de" como "del" antes del año
+    PATRON_FECHA_FINALIZACION_PRORROGA = r"hasta\s+el\s+(\d{1,2})\s+de\s+(\w+)\s+de(?:l)?\s+(\d{4})"
+    
+    # Patrón ESPECÍFICO para fecha en antecedentes (Cláusula Primera)
+    PATRON_FECHA_ANTECEDENTES = r"prorrogado\s+sucesivamente\s+hasta\s+el\s+(\d{1,2})\s+de\s+(\w+)\s+de(?:l)?\s+(\d{4})"
     
     # Patrón de fecha para RENOVACIÓN (Cláusula Sexta - fecha de inicio del nuevo contrato)
-    # Ejemplo: "a partir del 02 de Noviembre del 2025" o "a partir del 02 del Noviembre del 2025"
     PATRON_FECHA_INICIO_RENOVACION = r"a\s+partir\s+del\s+(\d{1,2})\s+de[l]?\s+(\w+)\s+del\s+(\d{4})"
     
     # Mapa de meses en español
@@ -206,7 +214,9 @@ class SectionDetector:
         """
         Detecta la sección de Contrato (Prórroga o Renovación).
         ASUME que el contrato SIEMPRE empieza en la página 1 (índice 0).
-        Incluye detección de tipo de documento y extracción de fecha.
+        
+        CAMBIO CLAVE: Busca primero la fecha en la Cláusula Primera (Antecedentes)
+        antes de buscar en cualquier otra parte del documento.
         
         Returns:
             Dict: {"inicio": int o None, "fin": int o None, "fecha": str o None}
@@ -237,45 +247,10 @@ class SectionDetector:
             if log_callback:
                 log_callback(f"  Tipo por defecto: RENOVACIÓN (no se detectó PRÓRROGA)")
         
-        # Extraer fecha según el tipo de documento
-        # Buscar fecha en las primeras 3 páginas
-        for offset in range(min(3, len(texto_paginas))):
-            idx = pagina_inicio + offset
-            texto = texto_paginas[idx]
-            
-            if tipo_documento == 'PRORROGA':
-                patron_fecha = re.compile(self.PATRON_FECHA_FINALIZACION_PRORROGA, re.IGNORECASE)
-                sumar_dias = 1  # PRÓRROGA: sumar 1 día
-            else:  # RENOVACION
-                patron_fecha = re.compile(self.PATRON_FECHA_INICIO_RENOVACION, re.IGNORECASE)
-                sumar_dias = 0  # RENOVACIÓN: tomar fecha tal cual
-            
-            match = patron_fecha.search(texto)
-            
-            if match:
-                dia = int(match.group(1))
-                mes_texto = match.group(2).lower()
-                anio = int(match.group(3))
-                
-                # Convertir mes a número
-                mes_num = self.MESES.get(mes_texto)
-                if mes_num:
-                    try:
-                        # Crear fecha
-                        fecha_obj = datetime(anio, int(mes_num), dia)
-                        
-                        # Aplicar ajuste solo si es PRÓRROGA
-                        if sumar_dias > 0:
-                            fecha_obj += timedelta(days=sumar_dias)
-                        
-                        fecha_contrato = f"{fecha_obj.strftime('%m')}.{fecha_obj.year}"
-                        
-                        if log_callback:
-                            log_callback(f"  Fecha extraída: {fecha_contrato} (página {idx + 1})")
-                        
-                        break
-                    except ValueError:
-                        continue
+        # EXTRAER FECHA - NUEVA LÓGICA PRIORITARIA
+        fecha_contrato = self._extraer_fecha_contrato_prioritaria(
+            texto_paginas, tipo_documento, log_callback
+        )
         
         # Detectar página final
         pagina_fin = None
@@ -333,6 +308,180 @@ class SectionDetector:
             "fin": pagina_fin,
             "fecha": fecha_contrato
         }
+    
+    def _extraer_fecha_contrato_prioritaria(
+        self,
+        texto_paginas: List[str],
+        tipo_documento: str,
+        log_callback: Optional[Callable] = None
+    ) -> Optional[str]:
+        """
+        Extrae la fecha del contrato con prioridad a la Cláusula Primera.
+        
+        NUEVA LÓGICA:
+        1. Primero buscar fecha ESPECÍFICA en Cláusula Primera (Antecedentes)
+        2. Si no encuentra, buscar fecha general en primeras páginas
+        3. Aplicar suma de 1 día si es PRÓRROGA
+        4. Convertir a formato MM.YYYY
+        
+        Args:
+            texto_paginas: Lista de texto por página
+            tipo_documento: 'PRORROGA' o 'RENOVACION'
+            log_callback: Función opcional para logging
+        
+        Returns:
+            Fecha en formato MM.YYYY o None
+        """
+        # Configurar según tipo de documento
+        if tipo_documento == 'PRORROGA':
+            sumar_dias = 1
+            patrones_a_probar = [
+                PatronesFecha.FECHA_ANTECEDENTES_PRORROGA,  # Primero antecedentes
+                PatronesFecha.FECHA_FINALIZACION_PRORROGA   # Luego general
+            ]
+        else:  # RENOVACION
+            sumar_dias = 0
+            patrones_a_probar = [PatronesFecha.FECHA_INICIO_RENOVACION]
+        
+        # ESTRATEGIA 1: Buscar primero en Cláusula Primera (Antecedentes)
+        fecha_extraida = self._buscar_fecha_en_antecedentes(
+            texto_paginas, patrones_a_probar, sumar_dias, log_callback
+        )
+        
+        if fecha_extraida:
+            return fecha_extraida
+        
+        # ESTRATEGIA 2: Búsqueda general en primeras 3 páginas
+        return self._buscar_fecha_general(
+            texto_paginas, patrones_a_probar, sumar_dias, log_callback
+        )
+    
+    def _buscar_fecha_en_antecedentes(
+        self,
+        texto_paginas: List[str],
+        patrones: List[str],
+        sumar_dias: int,
+        log_callback: Optional[Callable] = None
+    ) -> Optional[str]:
+        """
+        Busca fecha específicamente en la Cláusula Primera (Antecedentes).
+        
+        Args:
+            texto_paginas: Lista de texto por página
+            patrones: Lista de patrones regex a probar
+            sumar_dias: Días a sumar (1 para PRÓRROGA, 0 para RENOVACIÓN)
+            log_callback: Función opcional para logging
+        
+        Returns:
+            Fecha en formato MM.YYYY o None
+        """
+        patron_antecedentes = re.compile(PatronesSecciones.CLAUSULA_ANTECEDENTES, re.IGNORECASE)
+        
+        # Buscar Cláusula Primera en las primeras 3 páginas
+        for idx in range(min(3, len(texto_paginas))):
+            texto = texto_paginas[idx]
+            
+            if patron_antecedentes.search(texto):
+                # Encontrada Cláusula Primera, buscar fecha dentro de esta página
+                for patron in patrones:
+                    match = re.search(patron, texto, re.IGNORECASE)
+                    if match:
+                        return self._procesar_match_fecha(match, sumar_dias, log_callback, idx + 1)
+                
+                # Si no encuentra en esta página, buscar en páginas siguientes (máximo 2)
+                for offset in range(1, min(3, len(texto_paginas) - idx)):
+                    texto_siguiente = texto_paginas[idx + offset]
+                    for patron in patrones:
+                        match = re.search(patron, texto_siguiente, re.IGNORECASE)
+                        if match:
+                            return self._procesar_match_fecha(match, sumar_dias, log_callback, idx + offset + 1)
+        
+        return None
+    
+    def _buscar_fecha_general(
+        self,
+        texto_paginas: List[str],
+        patrones: List[str],
+        sumar_dias: int,
+        log_callback: Optional[Callable] = None
+    ) -> Optional[str]:
+        """
+        Búsqueda general de fecha en primeras páginas (fallback).
+        
+        Args:
+            texto_paginas: Lista de texto por página
+            patrones: Lista de patrones regex a probar
+            sumar_dias: Días a sumar (1 para PRÓRROGA, 0 para RENOVACIÓN)
+            log_callback: Función opcional para logging
+        
+        Returns:
+            Fecha en formato MM.YYYY o None
+        """
+        # Buscar en las primeras 3 páginas
+        for offset in range(min(3, len(texto_paginas))):
+            texto = texto_paginas[offset]
+            
+            for patron in patrones:
+                match = re.search(patron, texto, re.IGNORECASE)
+                if match:
+                    return self._procesar_match_fecha(match, sumar_dias, log_callback, offset + 1)
+        
+        return None
+    
+    def _procesar_match_fecha(
+        self,
+        match: re.Match,
+        sumar_dias: int,
+        log_callback: Optional[Callable] = None,
+        num_pagina: int = None
+    ) -> Optional[str]:
+        """
+        Procesa un match de fecha y lo convierte a formato MM.YYYY.
+        
+        Args:
+            match: Objeto match de regex
+            sumar_dias: Días a sumar a la fecha
+            log_callback: Función opcional para logging
+            num_pagina: Número de página donde se encontró (para logging)
+        
+        Returns:
+            Fecha en formato MM.YYYY o None
+        """
+        dia = int(match.group(1))
+        mes_texto = match.group(2).lower()
+        anio = int(match.group(3))
+        
+        # Convertir mes a número
+        mes_num = self.MESES.get(mes_texto)
+        if not mes_num:
+            if log_callback:
+                log_callback(f"  ⚠️ Mes '{mes_texto}' no reconocido")
+            return None
+        
+        try:
+            # Crear fecha
+            fecha_obj = datetime(anio, int(mes_num), dia)
+            
+            # Aplicar ajuste solo si es PRÓRROGA
+            if sumar_dias > 0:
+                fecha_original = fecha_obj.strftime('%d/%m/%Y')
+                fecha_obj += timedelta(days=sumar_dias)
+                
+                if log_callback:
+                    log_callback(f"  Fecha original: {fecha_original} + {sumar_dias} día(s)")
+            
+            fecha_formateada = f"{fecha_obj.strftime('%m')}.{fecha_obj.year}"
+            
+            if log_callback:
+                fuente = f"página {num_pagina}" if num_pagina else "documento"
+                log_callback(f"  Fecha extraída: {fecha_formateada} ({fuente})")
+            
+            return fecha_formateada
+            
+        except ValueError as e:
+            if log_callback:
+                log_callback(f"  ⚠️ Error procesando fecha: {e}")
+            return None
     
     def _detectar_guia_peligros(
         self,
@@ -449,7 +598,7 @@ class SectionDetector:
     def extraer_fecha_contrato(self, texto: str, tipo_documento: str = 'PRORROGA') -> Optional[str]:
         """
         Extrae la fecha del contrato y la convierte a MM.YYYY.
-        DEPRECATED: Usar _detectar_contrato() que ya incluye la lógica completa.
+        DEPRECATED: Usar _extraer_fecha_contrato_prioritaria() que ya incluye la lógica completa.
         
         Args:
             texto: Texto donde buscar la fecha

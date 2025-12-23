@@ -2,7 +2,6 @@
 
 ```
 ├── .gitignore
-├── build.py
 ├── controllers
 │   ├── contratos_controller.py
 │   └── renovaciones_controller.py
@@ -18,7 +17,8 @@
 │   │   └── section_detector.py
 │   └── utils
 │       ├── file_utils.py
-│       └── logger.py
+│       ├── logger.py
+│       └── regex_renovaciones.py
 ├── gui
 │   ├── main_window.py
 │   ├── resources
@@ -33,6 +33,4 @@
 │       ├── file_selector.py
 │       ├── log_viewer.py
 │       └── progress_dialog.py
-├── mapa.py
-├── progreso.md
 ```
